@@ -940,9 +940,12 @@ function showDrawingInfo(data) {
         </div>
 
         <!-- 分析按钮 -->
-        <div style="text-align: center; margin-bottom: 20px;">
+        <div style="text-align: center; margin-bottom: 20px; display: flex; gap: 12px; justify-content: center;">
             <button class="btn btn-primary" id="analyzeBtn" onclick="startAnalysis()" style="padding: 12px 32px; font-size: 16px;">
                 开始 AI 审查
+            </button>
+            <button class="btn btn-ghost" onclick="exportReport()" style="padding: 12px 24px; font-size: 14px;">
+                📄 导出审查报告
             </button>
         </div>
     </div>
@@ -1368,6 +1371,36 @@ function switchTab(event, tabId) {
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
     event.target.classList.add('active');
     document.getElementById(tabId).classList.add('active');
+}
+
+// ─── 导出报告 ───
+
+async function exportReport() {
+    if (!currentTaskId) {
+        alert('请先上传图纸文件');
+        return;
+    }
+
+    try {
+        const resp = await fetch(`/api/report/${currentTaskId}`);
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || '生成失败');
+
+        // 下载 Markdown 文件
+        const blob = new Blob([data.report_content], { type: 'text/markdown;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `审查报告_${currentTaskId}.md`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        alert('审查报告已导出');
+    } catch (error) {
+        alert('导出失败: ' + error.message);
+    }
 }
 
 // ─── 模型选择更新 ───

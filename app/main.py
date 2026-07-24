@@ -40,6 +40,7 @@ from app.services.dwg_converter import DWGConverter
 from app.renderers.dxf_renderer import DXFRenderer
 from app.ai.analyzer import AIAnalyzer
 from app.rules.engine import RuleEngine, get_rule_engine
+from app.services.report_generator import get_report_generator
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +426,55 @@ async def get_rule_check(task_id: str):
         "task_id": task_id,
         "summary": task.get("rule_check_summary", {}),
         "issues": task.get("rule_issues", []),
+    }
+
+
+@app.get("/api/report/{task_id}")
+async def get_report(task_id: str):
+    """生成并下载审查报告（Markdown）"""
+    if task_id not in _tasks:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+
+    task = _tasks[task_id]
+
+    # 组装报告数据
+    drawing_info = task.get("drawing_info", {})
+    rule_issues = task.get("rule_issues", [])
+    rule_summary = task.get("rule_check_summary", {})
+    ai_result = task.get("result")
+
+    # 获取材料数据（如果已解析）
+    materials = None
+    parser = task.get("parser_obj")
+    if parser and parser.doc and parser.msp:
+        try:
+            loop = asyncio.get_event_loop()
+            materials = await loop.run_in_executor(None, _extract_materials, parser)
+        except Exception as e:
+            logger.warning(f"材料数据提取失败: {e}")
+
+    # 生成报告
+    generator = get_report_generator()
+    report_md = generator.generate_markdown(
+        drawing_info=drawing_info,
+        rule_issues=rule_issues,
+        rule_summary=rule_summary,
+        ai_result=ai_result,
+        materials=materials,
+    )
+
+    # 保存到输出目录
+    output_dir = settings.storage.output_dir / task_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / f"审查报告_{task_id}.md"
+    report_path.write_text(report_md, encoding="utf-8")
+
+    logger.info(f"审查报告已生成: {report_path}")
+
+    return {
+        "task_id": task_id,
+        "report_path": str(report_path),
+        "report_content": report_md,
     }
 
 
