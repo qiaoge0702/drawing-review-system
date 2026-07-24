@@ -8,7 +8,7 @@
 
 ## 当前状态（2026-07-24 更新）
 
-### ✅ 已完成（v1.0 验证版）
+### ✅ 已完成（v1.1）
 
 | 模块 | 文件 | 功能 | 状态 |
 |------|------|------|------|
@@ -25,19 +25,16 @@
 | **DWG 转换** | `app/services/dwg_converter.py` | ODA/LibreDWG 双引擎 | ✅ |
 | **PNG 渲染** | `app/renderers/dxf_renderer.py` | ezdxf+Pillow 渲染 | ✅ |
 | **AI 分析** | `app/ai/analyzer.py` | Vision+Text 多 Provider | ✅ |
+| **规则引擎** | `app/rules/engine.py` | GB 1589/图纸规范硬校验 | ✅ 10测试 |
+| **报告生成** | `app/services/report_generator.py` | Markdown 审查报告 | ✅ |
 | **Web 服务** | `app/main.py` | FastAPI + WebSocket | ✅ |
 
-**单元测试：102 个，全部通过**
-
-### 🚧 进行中
-
-- 物料预览可视化（BOM 表格 + 图纸联动）
-- 规则引擎基础（GB 1589 外廓尺寸校验）
+**单元测试：112 个，全部通过**
 
 ### ⏳ 待开发
 
 - 人工审核批注（暂缓）
-- 审查报告 PDF 导出
+- PDF 报告导出（当前为 Markdown）
 - 生产级部署（数据库落库）
 
 ---
@@ -119,7 +116,9 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | `/api/upload` | POST | 上传 DWG/DXF |
 | `/api/analyze` | POST | 执行 AI 审查 |
 | `/api/result/{task_id}` | GET | 获取审查结果 |
+| `/api/rule-check/{task_id}` | GET | 获取规则检查结果 |
 | `/api/materials/{task_id}` | GET | 获取材料数据（BOM/尺寸/焊接） |
+| `/api/report/{task_id}` | GET | 生成并下载审查报告 |
 | `/api/rules` | GET/PUT | 生产规则管理 |
 | `/api/models` | GET | 支持的 AI 模型列表 |
 | `/ws/{task_id}` | WS | 进度推送 |
@@ -138,7 +137,7 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 │   ├── services/               # DWG 转换
 │   ├── renderers/              # PNG 渲染
 │   ├── ai/                     # AI 分析
-│   ├── rules/                  # 生产规则
+│   ├── rules/                  # 生产规则 + 规则引擎
 │   └── templates/              # 前端页面
 ├── tests/                      # 测试（102 通过）
 ├── docs/                       # 文档
@@ -158,5 +157,5 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ---
 
 **版本**: v1.1  
-**状态**: 核心功能完成，物料预览可视化开发中  
+**状态**: 核心功能完成，规则引擎+报告导出已上线  
 **更新**: 2026-07-24
