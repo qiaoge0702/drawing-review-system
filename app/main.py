@@ -39,12 +39,14 @@ from app.parsers.material_extractor import MaterialExtractor
 from app.services.dwg_converter import DWGConverter
 from app.renderers.dxf_renderer import DXFRenderer
 from app.ai.analyzer import AIAnalyzer
+from app.rules.engine import RuleEngine, get_rule_engine
 
 logger = logging.getLogger(__name__)
 
 # ─── 全局组件 ───
 dwg_converter = DWGConverter()
 dxf_renderer = DXFRenderer()
+rule_engine = get_rule_engine()
 
 # ─── 任务存储（内存，简单实现）───
 _tasks: Dict[str, Dict[str, Any]] = {}
@@ -230,6 +232,23 @@ async def upload_file(file: UploadFile = File(...)):
         _tasks[task_id]["status"] = "parsed"
         await _notify(task_id, "DXF 解析完成", 40)
 
+        # 自动执行规则检查
+        try:
+            await _notify(task_id, "正在执行规则检查...", 45)
+            rule_issues = rule_engine.check_drawing(_tasks[task_id]["drawing_info"])
+            _tasks[task_id]["rule_issues"] = [i.model_dump() for i in rule_issues]
+            _tasks[task_id]["rule_check_summary"] = {
+                "total": len(rule_issues),
+                "critical": sum(1 for i in rule_issues if i.severity.value == "critical"),
+                "warning": sum(1 for i in rule_issues if i.severity.value == "warning"),
+                "info": sum(1 for i in rule_issues if i.severity.value == "info"),
+            }
+            await _notify(task_id, f"规则检查完成，发现 {len(rule_issues)} 个问题", 48)
+        except Exception as e:
+            logger.warning(f"规则检查失败（不影响主流程）: {e}")
+            _tasks[task_id]["rule_issues"] = []
+            _tasks[task_id]["rule_check_summary"] = {"total": 0, "critical": 0, "warning": 0, "info": 0}
+
     except Exception as e:
         logger.error(f"DXF 解析失败: {e}")
         _tasks[task_id]["status"] = "error"
@@ -392,6 +411,20 @@ async def get_models():
             {"id": "moonshot-v1-128k-vision-preview", "name": "Moonshot Vision (旧版)", "vision": True, "json_mode": False},
         ],
         "custom": [],
+    }
+
+
+@app.get("/api/rule-check/{task_id}")
+async def get_rule_check(task_id: str):
+    """获取规则检查结果"""
+    if task_id not in _tasks:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+
+    task = _tasks[task_id]
+    return {
+        "task_id": task_id,
+        "summary": task.get("rule_check_summary", {}),
+        "issues": task.get("rule_issues", []),
     }
 
 
@@ -582,6 +615,9 @@ def _get_task_summary(task_id: str) -> Dict[str, Any]:
     }
     if "result" in task:
         result["result"] = task["result"]
+    if "rule_issues" in task:
+        result["rule_issues"] = task["rule_issues"]
+        result["rule_check_summary"] = task.get("rule_check_summary", {})
     return result
 
 

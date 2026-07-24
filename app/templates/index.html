@@ -911,6 +911,20 @@ function showDrawingInfo(data) {
             </div>
         </div>
 
+        <!-- 规则检查结果 -->
+        <div class="card" style="margin-bottom: 20px;" id="ruleCheckCard">
+            <div class="card-header">
+                <span class="card-title">规则检查（GB 标准硬校验）</span>
+                <span class="entity-tag" id="ruleCheckBadge">—</span>
+            </div>
+            <div class="card-body" id="ruleCheckBody">
+                <div class="empty-state" style="padding: 20px;">
+                    <div class="empty-icon"><span class="spinner" style="width: 24px; height: 24px;"></span></div>
+                    <p>正在执行规则检查...</p>
+                </div>
+            </div>
+        </div>
+
         <!-- 材料预览 -->
         <div class="card" style="margin-bottom: 20px;" id="materialsCard">
             <div class="card-header">
@@ -936,8 +950,82 @@ function showDrawingInfo(data) {
 
     document.getElementById('resultArea').innerHTML = html;
 
-    // 自动加载材料数据
+    // 自动加载材料数据和规则检查结果
     loadMaterials();
+    loadRuleCheck();
+}
+
+// ─── 规则检查展示 ───
+
+async function loadRuleCheck() {
+    if (!currentTaskId) return;
+
+    const body = document.getElementById('ruleCheckBody');
+    const badge = document.getElementById('ruleCheckBadge');
+    if (!body) return;
+
+    try {
+        const resp = await fetch(`/api/rule-check/${currentTaskId}`);
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || '获取失败');
+        showRuleCheck(data, body, badge);
+    } catch (error) {
+        body.innerHTML = `<div class="empty-state" style="padding: 20px;"><p>${error.message}</p></div>`;
+    }
+}
+
+function showRuleCheck(data, body, badge) {
+    const summary = data.summary || {};
+    const issues = data.issues || [];
+
+    // 更新徽章
+    if (summary.critical > 0) {
+        badge.textContent = `${summary.critical} 严重`;
+        badge.style.background = 'var(--danger-light)';
+        badge.style.color = 'var(--danger)';
+    } else if (summary.warning > 0) {
+        badge.textContent = `${summary.warning} 警告`;
+        badge.style.background = 'var(--warning-light)';
+        badge.style.color = 'var(--warning)';
+    } else {
+        badge.textContent = '通过';
+        badge.style.background = 'var(--success-light)';
+        badge.style.color = 'var(--success)';
+    }
+
+    if (issues.length === 0) {
+        body.innerHTML = `            <div style="display: flex; align-items: center; gap: 8px; padding: 12px; background: var(--success-light); border-radius: var(--radius-sm); color: var(--success);">
+                <span style="font-size: 18px;">✓</span>
+                <span style="font-weight: 500;">所有规则检查通过</span>
+            </div>`;
+        return;
+    }
+
+    // 按严重程度排序
+    const sevOrder = { critical: 0, warning: 1, info: 2 };
+    issues.sort((a, b) => (sevOrder[a.severity] || 99) - (sevOrder[b.severity] || 99));
+
+    const issuesHtml = issues.map(issue => {
+        const sev = issue.severity;
+        const sevText = sev === 'critical' ? '严重' : sev === 'warning' ? '警告' : '提示';
+        const sevClass = sev === 'critical' ? 'danger' : sev === 'warning' ? 'warning' : 'primary';
+        const bgColor = sev === 'critical' ? 'var(--danger-light)' : sev === 'warning' ? 'var(--warning-light)' : 'var(--primary-light)';
+        const borderColor = sev === 'critical' ? 'var(--danger)' : sev === 'warning' ? 'var(--warning)' : 'var(--primary)';
+
+        return `
+            <div style="padding: 12px; border-radius: var(--radius-sm); margin-bottom: 8px; background: ${bgColor}; border-left: 4px solid ${borderColor};">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+                    <span style="font-size: 13px; font-weight: 600;">${issue.title}</span>
+                    <span style="font-size: 11px; padding: 2px 8px; border-radius: 10px; background: ${borderColor}; color: white;">${sevText}</span>
+                </div>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">${issue.description}</div>
+                ${issue.suggestion ? `<div style="font-size: 12px; background: rgba(255,255,255,0.6); padding: 6px 8px; border-radius: 4px; margin-top: 4px;">💡 ${issue.suggestion}</div>` : ''}
+                ${issue.standard ? `<div style="font-size: 11px; color: var(--text-light); margin-top: 4px;">📄 ${issue.standard}</div>` : ''}
+            </div>
+        `;
+    }).join('');
+
+    body.innerHTML = issuesHtml;
 }
 
 // ─── 材料预览 ───
