@@ -1,0 +1,95 @@
+{
+  "version": "1.0",
+  "updated": "2026-07-23",
+  "description": "专用车辆上装设计审查默认规则模板",
+
+  "vehicle_dimensions": {
+    "max_overall_length_mm": 18000,
+    "max_overall_width_mm": 2550,
+    "max_overall_height_mm": 4000,
+    "standards": ["GB 1589-2016"],
+    "notes": "汽车及挂车外廓尺寸限值"
+  },
+
+  "material_specs": {
+    "longeron_material": "Q345B",
+    "cross_beam_material": "Q345B",
+    "van_body_material": "Q235B",
+    "tank_body_material": "Q345R",
+    "min_plate_thickness": {
+      "longeron_web": 6,
+      "longeron_flange": 8,
+      "cross_beam_web": 5,
+      "van_body_panel": 1.5,
+      "van_body_corrugated": 1.2,
+      "tank_body_shell": 6,
+      "tank_head": 8
+    },
+    "standards": ["GB/T 1591", "GB/T 700", "GB/T 713"],
+    "notes": "材料强度等级和最小板厚要求"
+  },
+
+  "welding_specs": {
+    "min_weld_length_mm": 30,
+    "min_weld_spacing_mm": 100,
+    "required_weld_types": ["角焊", "对接焊"],
+    "critical_weld_inspection": true,
+    "longeron_to_crossbeam": "满焊",
+    "body_to_subframe": "段焊，段长>=50mm，间距<=200mm",
+    "standards": ["JB/T 5943", "GB/T 985.1"],
+    "notes": "焊接件通用技术条件"
+  },
+
+  "dimension_tolerance": {
+    "overall_length_tolerance_mm": 10,
+    "overall_width_tolerance_mm": 5,
+    "overall_height_tolerance_mm": 5,
+    "hole_diameter_tolerance_mm": 0.5,
+    "shaft_diameter_tolerance_mm": 0.1,
+    "surface_flatness_mm": 2,
+    "standards": ["GB/T 1804"],
+    "notes": "一般公差"
+  },
+
+  "safety_requirements": {
+    "side_guard_required": true,
+    "rear_guard_required": true,
+    "side_guard_max_clearance_mm": 550,
+    "rear_guard_max_clearance_mm": 550,
+    "rear_guard_min_strength_kN": 70,
+    "anti_skid_surface_required": true,
+    "emergency_stop_required": false,
+    "standards": ["GB 7258-2017", "GB 11567"],
+    "notes": "机动车运行安全技术条件"
+  },
+
+  "drawing_standards": {
+    "title_block_required": true,
+    "scale_required": true,
+    "tolerance_table_required": true,
+    "weld_symbol_required": true,
+    "material_mark_required": true,
+    "dimension_complete": true,
+    "layer_naming_convention": "中文或英文缩写",
+    "standards": ["GB/T 14689", "GB/T 14690", "GB/T 4458"],
+    "notes": "工程制图标准"
+  },
+
+  "thread_specs": {
+    "min_bolt_grade": "8.8",
+    "critical_bolt_grade": "10.9",
+    "min_thread_engagement_mm": "1.5d",
+    "lock_nut_required_for_vibration": true,
+    "standards": ["GB/T 3098.1", "GB/T 5782"],
+    "notes": "螺栓强度等级和防松要求"
+  },
+
+  "surface_finish": {
+    "max_roughness_ra_welding_area": 25,
+    "max_roughness_ra_mating_surface": 6.3,
+    "max_roughness_ra_sealing_surface": 3.2,
+    "anti_corrosion_coating_required": true,
+    "standards": ["GB/T 3505", "GB/T 8923"],
+    "notes": "表面粗糙度和防腐要求"
+  }
+}

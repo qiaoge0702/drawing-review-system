@@ -1,0 +1,1373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>专用车辆上装设计图纸智能审查系统</title>
+    <style>
+        :root {
+            --bg: #f0f4f8;
+            --surface: #ffffff;
+            --primary: #3b82f6;
+            --primary-light: #dbeafe;
+            --primary-dark: #2563eb;
+            --success: #22c55e;
+            --success-light: #dcfce7;
+            --warning: #f59e0b;
+            --warning-light: #fef3c7;
+            --danger: #ef4444;
+            --danger-light: #fee2e2;
+            --text: #1e293b;
+            --text-secondary: #64748b;
+            --text-light: #94a3b8;
+            --border: #e2e8f0;
+            --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+            --shadow-lg: 0 10px 30px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.04);
+            --radius: 12px;
+            --radius-sm: 8px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* ─── 顶部导航 ─── */
+        .navbar {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 0 24px;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: var(--shadow);
+        }
+        .navbar-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text);
+        }
+        .navbar-brand .logo {
+            width: 36px; height: 36px;
+            background: linear-gradient(135deg, var(--primary), var(--success));
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            color: white;
+        }
+        .navbar-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .navbar-actions a {
+            color: var(--text-secondary);
+            font-size: 14px;
+            text-decoration: none;
+            padding: 6px 12px;
+            border-radius: var(--radius-sm);
+            transition: all 0.15s;
+        }
+        .navbar-actions a:hover {
+            background: var(--primary-light);
+            color: var(--primary-dark);
+        }
+
+        /* ─── 主容器 ─── */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        /* ─── 卡片 ─── */
+        .card {
+            background: var(--surface);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+        .card-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .card-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text);
+        }
+        .card-body {
+            padding: 20px;
+        }
+
+        /* ─── 上传区 ─── */
+        .upload-zone {
+            border: 2px dashed var(--border);
+            border-radius: var(--radius);
+            padding: 48px 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: #f8fafc;
+        }
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: var(--primary);
+            background: var(--primary-light);
+        }
+        .upload-zone .upload-icon {
+            width: 64px; height: 64px;
+            margin: 0 auto 16px;
+            background: var(--primary-light);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+        }
+        .upload-zone .upload-text {
+            font-size: 15px;
+            color: var(--text);
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+        .upload-zone .upload-hint {
+            font-size: 13px;
+            color: var(--text-light);
+        }
+
+        /* ─── 配置区 ─── */
+        .config-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .form-group {
+            margin-bottom: 12px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+        .form-control {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            font-size: 14px;
+            color: var(--text);
+            background: var(--surface);
+            transition: border-color 0.15s;
+            outline: none;
+        }
+        .form-control:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-light);
+        }
+        .form-control::placeholder {
+            color: var(--text-light);
+        }
+
+        /* ─── 按钮 ─── */
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: var(--radius-sm);
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+        .btn-primary:hover {
+            background: var(--primary-dark);
+        }
+        .btn-primary:disabled {
+            background: var(--text-light);
+            cursor: not-allowed;
+        }
+        .btn-success {
+            background: var(--success);
+            color: white;
+        }
+        .btn-ghost {
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+        .btn-ghost:hover {
+            background: #f1f5f9;
+        }
+
+        /* ─── 进度条 ─── */
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: var(--border);
+            border-radius: 3px;
+            overflow: hidden;
+            margin: 12px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary), var(--success));
+            border-radius: 3px;
+            transition: width 0.3s ease;
+            width: 0%;
+        }
+        .progress-steps {
+            display: flex;
+            gap: 4px;
+            margin-top: 8px;
+        }
+        .progress-step {
+            flex: 1;
+            padding: 6px 8px;
+            font-size: 12px;
+            color: var(--text-light);
+            text-align: center;
+            border-radius: var(--radius-sm);
+            background: #f1f5f9;
+            transition: all 0.2s;
+        }
+        .progress-step.active {
+            background: var(--primary-light);
+            color: var(--primary-dark);
+            font-weight: 500;
+        }
+        .progress-step.done {
+            background: var(--success-light);
+            color: var(--success);
+        }
+
+        /* ─── 统计卡片 ─── */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: var(--surface);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            padding: 16px;
+            box-shadow: var(--shadow);
+        }
+        .stat-card .stat-icon {
+            width: 36px; height: 36px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            margin-bottom: 8px;
+        }
+        .stat-card .stat-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--text);
+        }
+        .stat-card .stat-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 2px;
+        }
+
+        /* ─── 问题列表 ─── */
+        .issue-item {
+            padding: 14px 16px;
+            border-radius: var(--radius-sm);
+            margin-bottom: 8px;
+            border-left: 4px solid;
+            transition: all 0.15s;
+        }
+        .issue-item.critical {
+            background: var(--danger-light);
+            border-color: var(--danger);
+        }
+        .issue-item.warning {
+            background: var(--warning-light);
+            border-color: var(--warning);
+        }
+        .issue-item.info {
+            background: var(--primary-light);
+            border-color: var(--primary);
+        }
+        .issue-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 6px;
+        }
+        .issue-title {
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .issue-badge {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-weight: 500;
+        }
+        .issue-badge.critical { background: var(--danger); color: white; }
+        .issue-badge.warning { background: var(--warning); color: white; }
+        .issue-badge.info { background: var(--primary); color: white; }
+        .issue-desc {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+        .issue-suggestion {
+            font-size: 13px;
+            color: var(--text);
+            background: rgba(255,255,255,0.6);
+            padding: 8px 10px;
+            border-radius: 6px;
+            margin-top: 6px;
+        }
+        .issue-standard {
+            font-size: 12px;
+            color: var(--text-light);
+            margin-top: 4px;
+        }
+
+        /* ─── 图纸预览 ─── */
+        .preview-container {
+            background: #f8fafc;
+            border-radius: var(--radius-sm);
+            overflow: auto;
+            max-height: 500px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 200px;
+        }
+        .preview-container img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+        .preview-placeholder {
+            color: var(--text-light);
+            font-size: 14px;
+            padding: 40px;
+        }
+
+        /* ─── 标签页 ─── */
+        .tabs {
+            display: flex;
+            gap: 4px;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 16px;
+        }
+        .tab {
+            padding: 8px 16px;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.15s;
+        }
+        .tab:hover { color: var(--primary); }
+        .tab.active {
+            color: var(--primary);
+            border-color: var(--primary);
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* ─── 结果区 ─── */
+        .result-summary {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .result-score {
+            text-align: center;
+            padding: 20px;
+        }
+        .result-score .score-value {
+            font-size: 48px;
+            font-weight: 800;
+        }
+        .result-score .score-label {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+        .score-pass { color: var(--success); }
+        .score-fail { color: var(--danger); }
+
+        /* ─── 隐藏/显示 ─── */
+        .hidden { display: none !important; }
+
+        /* ─── 实体标签 ─── */
+        .entity-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 8px;
+        }
+        .entity-tag {
+            font-size: 12px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            background: #f1f5f9;
+            color: var(--text-secondary);
+        }
+
+        /* ─── 空状态 ─── */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-light);
+        }
+        .empty-state .empty-icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+        }
+
+        /* ─── 响应式 ─── */
+        @media (max-width: 768px) {
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+            .config-grid { grid-template-columns: 1fr; }
+            .result-summary { grid-template-columns: 1fr; }
+        }
+
+        /* ─── 动画 ─── */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .fade-in { animation: fadeIn 0.3s ease; }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .spinner {
+            width: 16px; height: 16px;
+            border: 2px solid var(--border);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+            display: inline-block;
+        }
+
+        /* ─── 数据表格 ─── */
+        .data-table-wrapper {
+            max-height: 400px;
+            overflow: auto;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+        }
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .data-table th {
+            background: #f1f5f9;
+            padding: 8px 12px;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+        .data-table td {
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border);
+            color: var(--text);
+        }
+        .data-table tr:hover {
+            background: #f8fafc;
+        }
+
+        /* ─── 文字内容列表 ─── */
+        .text-list-item {
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+        }
+        .text-list-item:last-child { border-bottom: none; }
+        .text-list-item .text-cat {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-weight: 500;
+            margin-right: 8px;
+        }
+        .text-cat.tech { background: var(--warning-light); color: var(--warning); }
+        .text-cat.annotation { background: var(--primary-light); color: var(--primary-dark); }
+        .text-cat.title { background: var(--success-light); color: var(--success); }
+        .text-cat.other { background: #f1f5f9; color: var(--text-secondary); }
+
+        /* ─── 焊接符号卡片 ─── */
+        .weld-item {
+            padding: 10px 14px;
+            border-radius: var(--radius-sm);
+            margin-bottom: 6px;
+            background: var(--warning-light);
+            border-left: 4px solid var(--warning);
+        }
+        .weld-type-badge {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: var(--warning);
+            color: white;
+            font-weight: 500;
+        }
+
+        /* ─── 搜索框 ─── */
+        .search-box {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            margin-bottom: 12px;
+            outline: none;
+        }
+        .search-box:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-light);
+        }
+
+        /* ─── 材料统计标签 ─── */
+        .mat-summary {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+        .mat-tag {
+            font-size: 13px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-weight: 500;
+        }
+        .mat-tag.bom { background: var(--primary-light); color: var(--primary-dark); }
+        .mat-tag.dim { background: var(--success-light); color: var(--success); }
+        .mat-tag.text { background: var(--warning-light); color: var(--warning); }
+        .mat-tag.weld { background: var(--danger-light); color: var(--danger); }
+    </style>
+</head>
+<body>
+
+<!-- ─── 顶部导航 ─── -->
+<nav class="navbar">
+    <div class="navbar-brand">
+        <div class="logo">D</div>
+        <span>专用车辆上装设计图纸智能审查系统</span>
+    </div>
+    <div class="navbar-actions">
+        <a href="#" onclick="showRules(); return false;">审查规则</a>
+        <a href="/api/health" target="_blank">系统状态</a>
+    </div>
+</nav>
+
+<div class="container">
+    <!-- ─── 上传区 ─── -->
+    <div class="card" style="margin-bottom: 20px;" id="uploadCard">
+        <div class="card-body">
+            <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+                <div class="upload-icon">📁</div>
+                <div class="upload-text">点击或拖拽上传图纸文件</div>
+                <div class="upload-hint">支持 DWG、DXF 格式，最大 50MB</div>
+            </div>
+            <input type="file" id="fileInput" accept=".dwg,.dxf" style="display:none" onchange="handleFileSelect(event)">
+        </div>
+    </div>
+
+    <!-- ─── AI 配置区 ─── -->
+    <div class="card" style="margin-bottom: 20px;" id="configCard">
+        <div class="card-header">
+            <span class="card-title">AI 审查配置</span>
+        </div>
+        <div class="card-body">
+            <div class="config-grid">
+                <div class="form-group">
+                    <label>AI 提供商</label>
+                    <select class="form-control" id="provider" onchange="updateModels()">
+                        <option value="openai">OpenAI (GPT-4o)</option>
+                        <option value="kimi">Kimi (月之暗面)</option>
+                        <option value="custom">自定义</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>模型</label>
+                    <select class="form-control" id="model">
+                        <option value="gpt-4o">GPT-4o (推荐)</option>
+                        <option value="gpt-4o-mini">GPT-4o mini</option>
+                        <option value="gpt-4-turbo">GPT-4 Turbo</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Base URL (可选，可手动修改)</label>
+                    <input type="text" class="form-control" id="baseUrl" list="baseUrlDatalist" placeholder="https://api.openai.com/v1" value="https://api.openai.com/v1">
+                    <datalist id="baseUrlDatalist">
+                        <option value="https://api.openai.com/v1">
+                    </datalist>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>API Key</label>
+                <input type="password" class="form-control" id="apiKey" placeholder="sk-..." style="font-family: monospace;">
+            </div>
+        </div>
+    </div>
+
+    <!-- ─── 进度区 ─── -->
+    <div class="card hidden" style="margin-bottom: 20px;" id="progressCard">
+        <div class="card-header">
+            <span class="card-title">处理进度</span>
+            <span class="spinner" id="progressSpinner"></span>
+        </div>
+        <div class="card-body">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="progress-steps">
+                <div class="progress-step" id="step-upload">上传</div>
+                <div class="progress-step" id="step-convert">DWG转换</div>
+                <div class="progress-step" id="step-parse">DXF解析</div>
+                <div class="progress-step" id="step-render">渲染图片</div>
+                <div class="progress-step" id="step-ai">AI审查</div>
+            </div>
+            <div id="progressMessage" style="margin-top: 8px; font-size: 13px; color: var(--text-secondary);"></div>
+        </div>
+    </div>
+
+    <!-- ─── 结果区 ─── -->
+    <div id="resultArea"></div>
+</div>
+
+<script>
+// ─── 全局状态 ───
+let currentTaskId = null;
+let ws = null;
+
+// ─── 文件上传 ───
+
+document.getElementById('uploadZone').addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.currentTarget.classList.add('dragover');
+});
+document.getElementById('uploadZone').addEventListener('dragleave', (e) => {
+    e.currentTarget.classList.remove('dragover');
+});
+document.getElementById('uploadZone').addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.currentTarget.classList.remove('dragover');
+    if (e.dataTransfer.files.length > 0) {
+        handleFile(e.dataTransfer.files[0]);
+    }
+});
+
+function handleFileSelect(event) {
+    const file = event.target.files[0];
+    if (file) handleFile(file);
+}
+
+async function handleFile(file) {
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (!['dwg', 'dxf'].includes(ext)) {
+        alert('请上传 DWG 或 DXF 文件');
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    // 显示进度
+    document.getElementById('progressCard').classList.remove('hidden');
+    document.getElementById('resultArea').innerHTML = '';
+    updateStep('upload', 'active');
+    setProgress(5, '正在上传文件...');
+
+    try {
+        const resp = await fetch('/api/upload', { method: 'POST', body: formData });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            throw new Error(data.detail || '上传失败');
+        }
+
+        currentTaskId = data.task_id;
+        updateStep('upload', 'done');
+
+        // 根据 file_type 判断是否已转换
+        if (data.file_type === 'dwg') {
+            updateStep('convert', 'done');
+        } else {
+            updateStep('convert', 'done');
+        }
+        updateStep('parse', 'done');
+
+        // 显示图纸信息
+        showDrawingInfo(data);
+
+        // 连接 WebSocket
+        connectWebSocket(data.task_id);
+
+        // 自动滚动到配置区
+        document.getElementById('configCard').scrollIntoView({ behavior: 'smooth' });
+
+    } catch (error) {
+        setProgress(0, '上传失败: ' + error.message);
+        updateStep('upload', '');
+    }
+}
+
+// ─── WebSocket ───
+
+function connectWebSocket(taskId) {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${protocol}//${location.host}/ws/${taskId}`);
+
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'progress') {
+            setProgress(data.progress, data.message);
+
+            // 更新步骤状态
+            if (data.progress >= 50) updateStep('render', 'done');
+            if (data.progress >= 70) updateStep('ai', 'active');
+            if (data.progress >= 100) {
+                updateStep('ai', 'done');
+                document.getElementById('progressSpinner').style.display = 'none';
+            }
+        }
+    };
+
+    ws.onclose = () => { console.log('WebSocket closed'); };
+}
+
+// ─── AI 分析 ───
+
+async function startAnalysis() {
+    if (!currentTaskId) {
+        alert('请先上传图纸文件');
+        return;
+    }
+
+    const apiKey = document.getElementById('apiKey').value.trim();
+    if (!apiKey) {
+        alert('请输入 API Key');
+        return;
+    }
+
+    const model = document.getElementById('model').value;
+    const baseUrl = document.getElementById('baseUrl').value.trim() || null;
+    const provider = document.getElementById('provider').value;
+
+    const btn = document.getElementById('analyzeBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 审查中...';
+
+    updateStep('render', 'active');
+    updateStep('ai', '');
+
+    try {
+        const resp = await fetch('/api/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                task_id: currentTaskId,
+                api_key: apiKey,
+                model: model,
+                base_url: baseUrl,
+                provider: provider,
+            })
+        });
+
+        const data = await resp.json();
+        if (!resp.ok) {
+            throw new Error(data.detail || '分析失败');
+        }
+
+        // 显示结果
+        showResult(data);
+
+    } catch (error) {
+        alert('AI 审查失败: ' + error.message);
+        setProgress(0, '审查失败: ' + error.message);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '开始 AI 审查';
+    }
+}
+
+// ─── UI 更新 ───
+
+function setProgress(percent, message) {
+    document.getElementById('progressFill').style.width = Math.max(0, percent) + '%';
+    document.getElementById('progressMessage').textContent = message;
+}
+
+function updateStep(stepName, status) {
+    const step = document.getElementById('step-' + stepName);
+    if (!step) return;
+    step.classList.remove('active', 'done');
+    if (status) step.classList.add(status);
+}
+
+// ─── 图纸信息展示 ───
+
+function showDrawingInfo(data) {
+    const info = data.drawing_info;
+    if (!info) return;
+
+    const entityCounts = info.entity_counts || {};
+    const entityTags = Object.entries(entityCounts)
+        .filter(([k, v]) => v > 0)
+        .map(([k, v]) => `<span class="entity-tag">${k}: ${v}</span>`)
+        .join('');
+
+    const html = `
+    <div class="fade-in">
+        <!-- 统计卡片 -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon" style="background: var(--primary-light);">📐</div>
+                <div class="stat-value">${info.total_entities || 0}</div>
+                <div class="stat-label">实体总数</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon" style="background: var(--success-light);">🗂</div>
+                <div class="stat-value">${info.layer_count || 0}</div>
+                <div class="stat-label">图层数</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon" style="background: var(--warning-light);">📏</div>
+                <div class="stat-value">${(info.extents.width / 1000).toFixed(2)}m</div>
+                <div class="stat-label">图纸宽度</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon" style="background: var(--danger-light);">📐</div>
+                <div class="stat-value">${(info.extents.height / 1000).toFixed(2)}m</div>
+                <div class="stat-label">图纸高度</div>
+            </div>
+        </div>
+
+        <!-- 图纸详情 -->
+        <div class="card" style="margin-bottom: 20px;">
+            <div class="card-header">
+                <span class="card-title">图纸信息</span>
+                <span class="entity-tag">${info.estimated_type || 'unknown'}</span>
+            </div>
+            <div class="card-body">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+                    <div>
+                        <label style="font-size: 12px; color: var(--text-light);">图样名称</label>
+                        <div style="font-size: 14px;">${info.metadata?.title || '—'}</div>
+                    </div>
+                    <div>
+                        <label style="font-size: 12px; color: var(--text-light);">图样代号</label>
+                        <div style="font-size: 14px;">${info.metadata?.drawing_no || '—'}</div>
+                    </div>
+                    <div>
+                        <label style="font-size: 12px; color: var(--text-light);">比例</label>
+                        <div style="font-size: 14px;">${info.metadata?.scale || '—'}</div>
+                    </div>
+                    <div>
+                        <label style="font-size: 12px; color: var(--text-light);">材料</label>
+                        <div style="font-size: 14px;">${info.metadata?.material || '—'}</div>
+                    </div>
+                </div>
+                <div class="entity-tags">${entityTags}</div>
+            </div>
+        </div>
+
+        <!-- 材料预览 -->
+        <div class="card" style="margin-bottom: 20px;" id="materialsCard">
+            <div class="card-header">
+                <span class="card-title">材料预览（DXF 自动提取）</span>
+                <button class="btn btn-ghost" onclick="loadMaterials()" style="font-size: 13px; padding: 4px 12px;">刷新</button>
+            </div>
+            <div class="card-body" id="materialsBody">
+                <div class="empty-state" style="padding: 30px 20px;">
+                    <div class="empty-icon"><span class="spinner" style="width: 32px; height: 32px; border-width: 3px;"></span></div>
+                    <p>正在从 DXF 提取材料数据...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 分析按钮 -->
+        <div style="text-align: center; margin-bottom: 20px;">
+            <button class="btn btn-primary" id="analyzeBtn" onclick="startAnalysis()" style="padding: 12px 32px; font-size: 16px;">
+                开始 AI 审查
+            </button>
+        </div>
+    </div>
+    `;
+
+    document.getElementById('resultArea').innerHTML = html;
+
+    // 自动加载材料数据
+    loadMaterials();
+}
+
+// ─── 材料预览 ───
+
+async function loadMaterials() {
+    if (!currentTaskId) return;
+
+    const body = document.getElementById('materialsBody');
+    if (!body) return;
+
+    body.innerHTML = '<div class="empty-state" style="padding: 30px 20px;"><div class="empty-icon"><span class="spinner" style="width: 32px; height: 32px; border-width: 3px;"></span></div><p>正在从 DXF 提取材料数据...</p></div>';
+
+    try {
+        const resp = await fetch(`/api/materials/${currentTaskId}`);
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || '提取失败');
+        showMaterials(data);
+    } catch (error) {
+        body.innerHTML = `<div class="empty-state" style="padding: 30px 20px;"><div class="empty-icon">&#9888;</div><p>${error.message}</p></div>`;
+    }
+}
+
+function showMaterials(data) {
+    const body = document.getElementById('materialsBody');
+    if (!body) return;
+
+    const bom = data.bom || { items: [], count: 0 };
+    const dims = data.dimensions || { items: [], count: 0 };
+    const texts = data.texts || {};
+    const welds = data.welds || { items: [], count: 0 };
+
+    const techReqs = texts.tech_requirements || [];
+    const annotations = texts.annotations || [];
+    const titleBlock = texts.title_block || [];
+    const otherTexts = texts.other || [];
+
+    // 统计标签
+    const summaryHtml = `
+        <div class="mat-summary">
+            <span class="mat-tag bom">BOM 明细 ${bom.count} 条</span>
+            <span class="mat-tag dim">尺寸标注 ${dims.count} 条</span>
+            <span class="mat-tag text">文字内容 ${texts.total_count || 0} 条</span>
+            <span class="mat-tag weld">焊接符号 ${welds.count} 条</span>
+        </div>
+    `;
+
+    // BOM 表格
+    let bomHtml = '';
+    if (bom.items.length > 0) {
+        bomHtml = `
+            <div class="data-table-wrapper">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>件号</th>
+                            <th>名称</th>
+                            <th>数量</th>
+                            <th>材料</th>
+                            <th>规格</th>
+                            <th>重量</th>
+                            <th>备注</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${bom.items.map(item => `
+                            <tr>
+                                <td>${item.item_no || '-'}</td>
+                                <td>${item.name || '-'}</td>
+                                <td>${item.qty || '-'}</td>
+                                <td>${item.material || '-'}</td>
+                                <td>${item.spec || '-'}</td>
+                                <td>${item.weight || '-'}</td>
+                                <td>${item.remark || '-'}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    } else {
+        bomHtml = '<div class="empty-state" style="padding: 30px;"><p>未检测到 BOM 明细表数据（需图纸中使用带属性的块定义明细表）</p></div>';
+    }
+
+    // 尺寸标注表格
+    let dimHtml = '';
+    if (dims.items.length > 0) {
+        // 按类型分组统计
+        const typeCounts = {};
+        dims.items.forEach(d => {
+            typeCounts[d.dim_type] = (typeCounts[d.dim_type] || 0) + 1;
+        });
+        const typeSummary = Object.entries(typeCounts)
+            .map(([t, c]) => `<span class="entity-tag">${t}: ${c}</span>`)
+            .join('');
+
+        dimHtml = `
+            <div class="entity-tags" style="margin-bottom: 12px;">${typeSummary}</div>
+            <input type="text" class="search-box" placeholder="搜索标注值或文字..." onkeyup="filterTable(this, 'dimTableBody')">
+            <div class="data-table-wrapper">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>类型</th>
+                            <th>测量值</th>
+                            <th>标注文字</th>
+                            <th>图层</th>
+                        </tr>
+                    </thead>
+                    <tbody id="dimTableBody">
+                        ${dims.items.map(item => `
+                            <tr>
+                                <td>${item.dim_type}</td>
+                                <td>${item.measurement || '-'}</td>
+                                <td>${item.text || '-'}</td>
+                                <td>${item.layer || '-'}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    } else {
+        dimHtml = '<div class="empty-state" style="padding: 30px;"><p>未检测到尺寸标注</p></div>';
+    }
+
+    // 文字内容
+    let textHtml = '';
+    const renderTextList = (items, catLabel, catClass) => {
+        if (items.length === 0) return '';
+        return items.map(t => `
+            <div class="text-list-item">
+                <span class="text-cat ${catClass}">${catLabel}</span>
+                <span style="font-size: 11px; color: var(--text-light);">(${t.text_type})</span>
+                <div style="margin-top: 4px; white-space: pre-wrap; word-break: break-all;">${escapeHtml(t.content)}</div>
+            </div>
+        `).join('');
+    };
+
+    const techHtml = renderTextList(techReqs, '技术要求', 'tech');
+    const annotHtml = renderTextList(annotations, '注释', 'annotation');
+    const titleHtml = renderTextList(titleBlock, '标题栏', 'title');
+    const otherHtml = renderTextList(otherTexts, '其他', 'other');
+
+    if (texts.total_count > 0) {
+        textHtml = `
+            <input type="text" class="search-box" placeholder="搜索文字内容..." onkeyup="filterTextList(this, 'textListContainer')">
+            <div id="textListContainer" style="border: 1px solid var(--border); border-radius: var(--radius-sm); max-height: 400px; overflow: auto;">
+                ${techHtml || annotHtml || titleHtml || otherHtml ? techHtml + annotHtml + titleHtml + otherHtml : '<div class="empty-state" style="padding: 30px;"><p>无文字内容</p></div>'}
+            </div>
+        `;
+    } else {
+        textHtml = '<div class="empty-state" style="padding: 30px;"><p>未检测到文字内容</p></div>';
+    }
+
+    // 焊接符号
+    let weldHtml = '';
+    if (welds.items.length > 0) {
+        weldHtml = welds.items.map(item => `
+            <div class="weld-item">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+                    <span style="font-size: 13px; font-weight: 600;">${escapeHtml(item.text)}</span>
+                    <span class="weld-type-badge">${item.weld_type || 'unknown'}</span>
+                </div>
+                <div style="font-size: 12px; color: var(--text-light);">
+                    来源: ${item.source_type} | 图层: ${item.layer || '-'}
+                </div>
+            </div>
+        `).join('');
+    } else {
+        weldHtml = '<div class="empty-state" style="padding: 30px;"><p>未检测到焊接符号</p></div>';
+    }
+
+    body.innerHTML = `
+        ${summaryHtml}
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab(event, 'mat-bom')">BOM 明细 (${bom.count})</div>
+            <div class="tab" onclick="switchTab(event, 'mat-dim')">尺寸标注 (${dims.count})</div>
+            <div class="tab" onclick="switchTab(event, 'mat-text')">文字内容 (${texts.total_count || 0})</div>
+            <div class="tab" onclick="switchTab(event, 'mat-weld')">焊接符号 (${welds.count})</div>
+        </div>
+
+        <div id="mat-bom" class="tab-content active">
+            ${bomHtml}
+        </div>
+        <div id="mat-dim" class="tab-content">
+            ${dimHtml}
+        </div>
+        <div id="mat-text" class="tab-content">
+            ${textHtml}
+        </div>
+        <div id="mat-weld" class="tab-content">
+            ${weldHtml}
+        </div>
+    `;
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function filterTable(input, tbodyId) {
+    const filter = input.value.toLowerCase();
+    const tbody = document.getElementById(tbodyId);
+    if (!tbody) return;
+    tbody.querySelectorAll('tr').forEach(tr => {
+        const text = tr.textContent.toLowerCase();
+        tr.style.display = text.includes(filter) ? '' : 'none';
+    });
+}
+
+function filterTextList(input, containerId) {
+    const filter = input.value.toLowerCase();
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    container.querySelectorAll('.text-list-item').forEach(item => {
+        const text = item.textContent.toLowerCase();
+        item.style.display = text.includes(filter) ? '' : 'none';
+    });
+}
+
+// ─── 审查结果展示 ───
+
+function showResult(data) {
+    const result = data.result;
+    if (!result) return;
+
+    const issues = result.issues || [];
+    const summary = result.summary || {};
+    const critical = issues.filter(i => i.severity === 'critical');
+    const warning = issues.filter(i => i.severity === 'warning');
+    const info = issues.filter(i => i.severity === 'info');
+
+    const passed = summary.overall_status === '通过';
+    const scoreClass = passed ? 'score-pass' : 'score-fail';
+
+    let issuesHtml = '';
+    [...critical, ...warning, ...info].forEach((issue, idx) => {
+        const sev = issue.severity;
+        const sevText = sev === 'critical' ? '严重' : sev === 'warning' ? '警告' : '提示';
+        issuesHtml += `
+        <div class="issue-item ${sev} fade-in" style="animation-delay: ${idx * 0.05}s">
+            <div class="issue-header">
+                <span class="issue-title">${issue.title || '未命名问题'}</span>
+                <span class="issue-badge ${sev}">${sevText}</span>
+            </div>
+            <div class="issue-desc">${issue.description || ''}</div>
+            ${issue.location ? `<div style="font-size: 12px; color: var(--text-light);">📍 ${issue.location}</div>` : ''}
+            ${issue.suggestion ? `<div class="issue-suggestion">💡 ${issue.suggestion}</div>` : ''}
+            ${issue.standard ? `<div class="issue-standard">📄 ${issue.standard}</div>` : ''}
+        </div>
+        `;
+    });
+
+    if (issues.length === 0) {
+        issuesHtml = '<div class="empty-state"><div class="empty-icon">✅</div><p>未发现问题</p></div>';
+    }
+
+    const recommendationsHtml = (result.recommendations || [])
+        .map(r => `<li style="padding: 6px 0; font-size: 13px; color: var(--text-secondary);">${r}</li>`)
+        .join('');
+
+    const html = `
+    <div class="fade-in">
+        <!-- 审查摘要 -->
+        <div class="result-summary">
+            <div class="card">
+                <div class="card-body result-score">
+                    <div class="score-value ${scoreClass}">${passed ? '通过' : '未通过'}</div>
+                    <div class="score-label">审查结论</div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-body result-score">
+                    <div class="score-value ${scoreClass}">${summary.critical_count || 0}:${summary.warning_count || 0}:${summary.info_count || 0}</div>
+                    <div class="score-label">严重 : 警告 : 提示</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 标签页 -->
+        <div class="card">
+            <div class="card-body">
+                <div class="tabs">
+                    <div class="tab active" onclick="switchTab(event, 'tab-issues')">问题清单 (${issues.length})</div>
+                    <div class="tab" onclick="switchTab(event, 'tab-preview')">图纸预览</div>
+                    <div class="tab" onclick="switchTab(event, 'tab-detail')">详细信息</div>
+                </div>
+
+                <!-- 问题清单 -->
+                <div id="tab-issues" class="tab-content active">
+                    ${issuesHtml}
+                </div>
+
+                <!-- 图纸预览 -->
+                <div id="tab-preview" class="tab-content">
+                    <div class="preview-container">
+                        <img src="/api/image/${currentTaskId}" alt="图纸预览" onerror="this.parentElement.innerHTML='<div class=preview-placeholder>图片加载失败</div>'">
+                    </div>
+                </div>
+
+                <!-- 详细信息 -->
+                <div id="tab-detail" class="tab-content">
+                    <div style="margin-bottom: 16px;">
+                        <label style="font-size: 13px; font-weight: 600; color: var(--text);">车型识别</label>
+                        <div style="margin-top: 4px;">
+                            <span class="entity-tag">${result.vehicle_name || '—'}</span>
+                            <span class="entity-tag">置信度: ${result.confidence || 0}%</span>
+                        </div>
+                        <div style="font-size: 13px; color: var(--text-secondary); margin-top: 6px;">${result.reasoning || ''}</div>
+                    </div>
+                    ${recommendationsHtml ? `
+                    <div>
+                        <label style="font-size: 13px; font-weight: 600; color: var(--text);">优化建议</label>
+                        <ul style="margin-top: 6px; padding-left: 20px;">${recommendationsHtml}</ul>
+                    </div>
+                    ` : ''}
+                    <div style="margin-top: 16px;">
+                        <label style="font-size: 13px; font-weight: 600; color: var(--text);">总体评价</label>
+                        <div style="font-size: 13px; color: var(--text-secondary); margin-top: 6px;">${summary.assessment || ''}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    `;
+
+    const resultArea = document.getElementById('resultArea');
+    // 保留统计卡片和图纸信息，追加结果
+    resultArea.insertAdjacentHTML('beforeend', html);
+    resultArea.scrollIntoView({ behavior: 'smooth' });
+}
+
+// ─── 标签页切换 ───
+
+function switchTab(event, tabId) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    event.target.classList.add('active');
+    document.getElementById(tabId).classList.add('active');
+}
+
+// ─── 模型选择更新 ───
+
+const MODEL_OPTIONS = {
+    openai: [
+        { id: 'gpt-4o', name: 'GPT-4o (推荐)' },
+        { id: 'gpt-4o-mini', name: 'GPT-4o mini' },
+        { id: 'gpt-4-turbo', name: 'GPT-4 Turbo' },
+    ],
+    kimi: [
+        { id: 'kimi-k3', name: 'Kimi K3 (推荐)' },
+        { id: 'kimi-k2.6', name: 'Kimi K2.6' },
+        { id: 'kimi-k2.7-code', name: 'Kimi K2.7 Code' },
+        { id: 'moonshot-v1-128k-vision-preview', name: 'Moonshot Vision (旧版)' },
+    ],
+    custom: [
+        { id: 'gpt-4o', name: '自定义 (输入模型名)' },
+    ],
+};
+
+// 各 Provider 的默认 Base URL 和可选项
+const BASE_URL_DEFAULTS = {
+    openai: 'https://api.openai.com/v1',
+    kimi: 'https://api.moonshot.ai/v1',
+    custom: '',
+};
+const BASE_URL_OPTIONS = {
+    openai: ['https://api.openai.com/v1'],
+    kimi: ['https://api.moonshot.ai/v1', 'https://api.moonshot.cn/v1'],
+    custom: [],
+};
+
+function updateModels() {
+    const provider = document.getElementById('provider').value;
+    const select = document.getElementById('model');
+    const models = MODEL_OPTIONS[provider] || [];
+
+    if (provider === 'custom') {
+        // 自定义模式：允许手动输入
+        select.outerHTML = '<input type="text" class="form-control" id="model" value="gpt-4o" placeholder="输入模型名称">';
+    } else {
+        // 确保是 select
+        const current = document.getElementById('model');
+        if (current.tagName === 'INPUT') {
+            current.outerHTML = '<select class="form-control" id="model"></select>';
+        }
+        const sel = document.getElementById('model');
+        sel.innerHTML = models.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
+    }
+
+    // 更新 base_url 默认值和下拉选项
+    const urlInput = document.getElementById('baseUrl');
+    const urlDatalist = document.getElementById('baseUrlDatalist');
+    const defaultUrl = BASE_URL_DEFAULTS[provider] || '';
+    const urlOptions = BASE_URL_OPTIONS[provider] || [];
+
+    // 切换 Provider 时自动填充默认 Base URL
+    urlInput.value = defaultUrl;
+    urlInput.placeholder = defaultUrl || 'https://your-api.com/v1';
+
+    // 更新 datalist 下拉选项
+    urlDatalist.innerHTML = urlOptions.map(u => `<option value="${u}">`).join('');
+}
+
+// ─── 规则查看 ───
+
+async function showRules() {
+    try {
+        const resp = await fetch('/api/rules');
+        const rules = await resp.json();
+        const text = JSON.stringify(rules, null, 2);
+        const w = window.open('', '_blank', 'width=600,height=800');
+        w.document.write(`<pre style="padding:20px;font-size:13px;white-space:pre-wrap;">${text}</pre>`);
+    } catch (e) {
+        alert('获取规则失败: ' + e.message);
+    }
+}
+
+// ─── 初始化 ───
+
+// 检查系统状态
+fetch('/api/health').then(r => r.json()).then(data => {
+    console.log('系统状态:', data);
+}).catch(() => {
+    console.warn('系统状态检查失败');
+});
+</script>
+
+</body>
+</html>
