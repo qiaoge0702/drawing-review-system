@@ -10,3 +10,6 @@ temp/
 .DS_Store
 *.log
 .workbuddy/
+
+# SolidWorks temp files
+~$*
