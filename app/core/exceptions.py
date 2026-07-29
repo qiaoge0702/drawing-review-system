@@ -39,6 +39,16 @@ class ErrorCode(str, Enum):
     VAL_MISSING_REQUIRED = "VAL_002"
     VAL_TYPE_MISMATCH = "VAL_003"
     VAL_RANGE_ERROR = "VAL_004"
+    
+    # 生成错误 (GEN)
+    GEN_PIPELINE_ERROR = "GEN_001"
+    GEN_STEP_FAILED = "GEN_002"
+    GEN_SW_NOT_AVAILABLE = "GEN_003"
+    GEN_SW_TIMEOUT = "GEN_004"
+    GEN_INVALID_FILE = "GEN_005"
+    GEN_UNSUPPORTED_FEATURE = "GEN_006"
+    GEN_CHECKPOINT_ERROR = "GEN_007"
+    GEN_RERUN_ERROR = "GEN_008"
 
 
 class DesignReviewException(Exception):
@@ -169,3 +179,56 @@ class ValidationException(DesignReviewException):
         super().__init__(message, error_code, detail, ctx)
         self.field_name = field_name
         self.field_value = field_value
+
+
+class GenerationException(DesignReviewException):
+    """图纸生成异常"""
+    
+    def __init__(
+        self,
+        message: str,
+        error_code: ErrorCode = ErrorCode.GEN_PIPELINE_ERROR,
+        task_id: Optional[str] = None,
+        step: Optional[int] = None,
+        step_name: Optional[str] = None,
+        detail: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+        recoverable: bool = False
+    ):
+        ctx = context or {}
+        if task_id:
+            ctx["task_id"] = task_id
+        if step:
+            ctx["step"] = step
+        if step_name:
+            ctx["step_name"] = step_name
+        ctx["recoverable"] = recoverable
+        super().__init__(message, error_code, detail, ctx)
+        self.task_id = task_id
+        self.step = step
+        self.step_name = step_name
+        self.recoverable = recoverable
+
+
+class SWException(GenerationException):
+    """SolidWorks 相关异常"""
+    
+    def __init__(
+        self,
+        message: str,
+        error_code: ErrorCode = ErrorCode.GEN_SW_NOT_AVAILABLE,
+        sw_version: Optional[str] = None,
+        detail: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None
+    ):
+        ctx = context or {}
+        if sw_version:
+            ctx["sw_version"] = sw_version
+        super().__init__(
+            message,
+            error_code=error_code,
+            detail=detail,
+            context=ctx,
+            recoverable=error_code == ErrorCode.GEN_SW_TIMEOUT
+        )
+        self.sw_version = sw_version

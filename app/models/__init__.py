@@ -32,6 +32,18 @@ from .check_result import (
     CheckSummary,
     CheckResult,
 )
+from .generation import (
+    DrawingType,
+    StepName,
+    StepStatus,
+    PipelineState,
+    ArtifactType,
+    Artifact,
+    StepResult,
+    TaskConfig,
+    TaskResult,
+    GenerateSettings,
+)
 
 __all__ = [
     # Vehicle
@@ -63,4 +75,15 @@ __all__ = [
     "Issue",
     "CheckSummary",
     "CheckResult",
+    # Generation
+    "DrawingType",
+    "StepName",
+    "StepStatus",
+    "PipelineState",
+    "ArtifactType",
+    "Artifact",
+    "StepResult",
+    "TaskConfig",
+    "TaskResult",
+    "GenerateSettings",
 ]
