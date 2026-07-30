@@ -3,44 +3,121 @@ Step 1: 3D模型加载
 
 通过 pywin32 + SW COM API 加载 SolidWorks 文件，提取基本信息。
 复用现有 app.parsers.sw_parser 的能力。
+
+COM 调用统一经 app.generators.sw_com.run_sw 在专用线程执行，
+parser 在单次调用内创建并显式释放（quit），避免资源泄漏。
 """
 
+import json
 import logging
 from pathlib import Path
 from typing import Dict, Any
 
 from app.generators.models import StepContext
-from app.parsers.sw_parser import SWParser, SWAssembly, SWPart
+from app.generators.sw_com import run_sw
+from app.parsers.sw_parser import SWParser
 from app.core.exceptions import SWException, ErrorCode
 
 logger = logging.getLogger(__name__)
 
 
+def _load_sw_file_sync(source_file: str, output_dir: str) -> Dict[str, Any]:
+    """
+    【同步/COM线程】加载 SW 文件并提取信息
+
+    parser 生命周期：本函数内创建，finally 中 close_document + quit，
+    不跨调用持有，杜绝 SW 应用句柄泄漏。
+    """
+    parser = SWParser()
+    try:
+        ext = Path(source_file).suffix.lower()
+        if ext == ".sldasm":
+            result = _parse_assembly(parser, source_file)
+        elif ext == ".sldprt":
+            result = _parse_part(parser, source_file)
+        else:
+            raise SWException(
+                f"Unsupported file type: {ext}",
+                error_code=ErrorCode.GEN_INVALID_FILE,
+            )
+
+        # 保存完整数据到输出目录
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        json_file = out / ("assembly.json" if ext == ".sldasm" else "part.json")
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+
+        return result
+    finally:
+        try:
+            parser.close_document(source_file)
+        except Exception as e:
+            logger.warning(f"Failed to close document: {e}")
+        try:
+            parser.quit()
+        except Exception as e:
+            logger.warning(f"Failed to quit SW parser: {e}")
+
+
+def _parse_assembly(parser: SWParser, filepath: str) -> Dict[str, Any]:
+    """【同步/COM线程】解析装配体"""
+    assembly = parser.parse_assembly(filepath)
+    return {
+        "file_type": "assembly",
+        "name": assembly.name,
+        "path": assembly.path,
+        "component_count": len(assembly.components),
+        "components": [
+            {
+                "name": comp.name,
+                "path": comp.path,
+                "instance_id": comp.instance_id,
+                "quantity": comp.quantity,
+                "is_suppressed": comp.is_suppressed,
+                "is_hidden": comp.is_hidden,
+            }
+            for comp in assembly.components
+        ],
+    }
+
+
+def _parse_part(parser: SWParser, filepath: str) -> Dict[str, Any]:
+    """【同步/COM线程】解析零件"""
+    part = parser.parse_part(filepath)
+    return {
+        "file_type": "part",
+        "name": part.name,
+        "path": part.path,
+        "material": {
+            "name": part.material.name,
+            "description": part.material.description,
+        },
+        "mass": part.mass,
+        "bounding_box": part.bounding_box,
+        "feature_count": len(part.features),
+        "features": [
+            {
+                "name": feat.name,
+                "type": feat.feature_type,
+            }
+            for feat in part.features[:50]  # 限制数量
+        ],
+    }
+
+
 class SWLoadExecutor:
     """
     Step 1 执行器: 加载 SolidWorks 文件
-    
-    输入: StepContext.work_dir / input / source_file (通过 context 传递路径)
+
+    输入: ctx.parameters["source_file"]
     输出: {
-        "assembly": {...},     # 装配体信息（如果是.SLDASM）
-        "part": {...},         # 零件信息（如果是.SLDPRT）
-        "snapshot_path": "..." # SW视口截图路径
+        "assembly": {...} | "part": {...},
+        "snapshot_path": None  # M1 占位，M2 接入 SW SaveAsImage
     }
     """
-    
-    def __init__(self):
-        self._parser: SWParser | None = None
-    
+
     async def __call__(self, ctx: StepContext) -> Dict[str, Any]:
-        """
-        执行 SW 文件加载
-        
-        Args:
-            ctx: 步骤上下文
-            
-        Returns:
-            包含装配体/零件信息的字典
-        """
         source_file = ctx.parameters.get("source_file", "")
         if not source_file:
             raise SWException(
@@ -49,7 +126,7 @@ class SWLoadExecutor:
                 task_id=ctx.task_id,
                 step=ctx.step,
             )
-        
+
         source_path = Path(source_file)
         if not source_path.exists():
             raise SWException(
@@ -58,35 +135,14 @@ class SWLoadExecutor:
                 task_id=ctx.task_id,
                 step=ctx.step,
             )
-        
+
         logger.info(f"[Task:{ctx.task_id}] Loading SW file: {source_file}")
-        
+
+        output_dir = ctx.get_output_path("")
         try:
-            # 初始化 SW 连接（复用现有解析器）
-            self._parser = SWParser()
-            
-            # 根据文件类型解析
-            ext = source_path.suffix.lower()
-            if ext == ".sldasm":
-                result = await self._load_assembly(ctx, source_file)
-            elif ext == ".sldprt":
-                result = await self._load_part(ctx, source_file)
-            else:
-                raise SWException(
-                    f"Unsupported file type: {ext}",
-                    error_code=ErrorCode.GEN_INVALID_FILE,
-                    task_id=ctx.task_id,
-                    step=ctx.step,
-                )
-            
-            # 保存截图
-            snapshot_path = await self._save_snapshot(ctx, source_file)
-            if snapshot_path:
-                result["snapshot_path"] = snapshot_path
-            
-            logger.info(f"[Task:{ctx.task_id}] SW file loaded successfully")
-            return result
-            
+            result = await run_sw(_load_sw_file_sync, source_file, str(output_dir))
+        except SWException:
+            raise  # 保留原始错误码（如 GEN_INVALID_FILE），避免误判重试
         except Exception as e:
             logger.exception(f"[Task:{ctx.task_id}] Failed to load SW file: {e}")
             raise SWException(
@@ -96,113 +152,9 @@ class SWLoadExecutor:
                 step=ctx.step,
                 detail=str(e),
             )
-        finally:
-            # 关闭文档但不退出 SW（保持连接复用）
-            if self._parser:
-                try:
-                    self._parser.close_document(source_file)
-                except Exception as e:
-                    logger.warning(f"[Task:{ctx.task_id}] Failed to close document: {e}")
-    
-    async def _load_assembly(self, ctx: StepContext, filepath: str) -> Dict[str, Any]:
-        """加载装配体"""
-        logger.debug(f"[Task:{ctx.task_id}] Parsing assembly: {filepath}")
-        
-        assembly = self._parser.parse_assembly(filepath)
-        
-        # 序列化装配体信息
-        result = {
-            "file_type": "assembly",
-            "name": assembly.name,
-            "path": assembly.path,
-            "component_count": len(assembly.components),
-            "components": [
-                {
-                    "name": comp.name,
-                    "path": comp.path,
-                    "instance_id": comp.instance_id,
-                    "quantity": comp.quantity,
-                    "is_suppressed": comp.is_suppressed,
-                    "is_hidden": comp.is_hidden,
-                }
-                for comp in assembly.components
-            ],
-        }
-        
-        # 保存完整装配体数据到输出目录
-        output_dir = ctx.get_output_path("")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        import json
-        assembly_file = output_dir / "assembly.json"
-        with open(assembly_file, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        
-        logger.debug(f"[Task:{ctx.task_id}] Assembly parsed: {result['component_count']} components")
+
+        # M1 占位：不产出假截图路径（审查 B4），M2 接入 SW SaveAsImage
+        result["snapshot_path"] = None
+
+        logger.info(f"[Task:{ctx.task_id}] SW file loaded successfully")
         return result
-    
-    async def _load_part(self, ctx: StepContext, filepath: str) -> Dict[str, Any]:
-        """加载零件"""
-        logger.debug(f"[Task:{ctx.task_id}] Parsing part: {filepath}")
-        
-        part = self._parser.parse_part(filepath)
-        
-        result = {
-            "file_type": "part",
-            "name": part.name,
-            "path": part.path,
-            "material": {
-                "name": part.material.name,
-                "description": part.material.description,
-            },
-            "mass": part.mass,
-            "bounding_box": part.bounding_box,
-            "feature_count": len(part.features),
-            "features": [
-                {
-                    "name": feat.name,
-                    "type": feat.feature_type,
-                }
-                for feat in part.features[:50]  # 限制数量
-            ],
-        }
-        
-        # 保存完整零件数据
-        output_dir = ctx.get_output_path("")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        import json
-        part_file = output_dir / "part.json"
-        with open(part_file, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        
-        logger.debug(f"[Task:{ctx.task_id}] Part parsed: {result['feature_count']} features")
-        return result
-    
-    async def _save_snapshot(self, ctx: StepContext, filepath: str) -> str | None:
-        """保存 SW 视口截图"""
-        try:
-            # 通过 SW API 保存截图
-            doc = self._parser.open_document(filepath)
-            
-            # 获取模型视图
-            model_view = doc.ActiveView
-            if not model_view:
-                logger.warning(f"[Task:{ctx.task_id}] No active view found")
-                return None
-            
-            # 保存为 PNG
-            output_dir = ctx.get_output_path("")
-            output_dir.mkdir(parents=True, exist_ok=True)
-            snapshot_path = output_dir / "snapshot.png"
-            
-            # SW API: 保存视口图像
-            # 注意：这需要具体的 SW API 调用，这里使用占位实现
-            # model_view.SaveAsImage(str(snapshot_path))
-            
-            logger.debug(f"[Task:{ctx.task_id}] Snapshot saved: {snapshot_path}")
-            return str(snapshot_path)
-            
-        except Exception as e:
-            logger.warning(f"[Task:{ctx.task_id}] Failed to save snapshot: {e}")
-            return None

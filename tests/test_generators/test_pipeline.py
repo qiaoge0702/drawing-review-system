@@ -179,9 +179,9 @@ class TestGeneratePipeline:
             config=TaskConfig(),
         )
         
-        # 验证检查点存在
-        assert pipeline._has_checkpoint("test_003", 1) is True
-        assert pipeline._has_checkpoint("test_003", 8) is True
+        # 验证检查点存在（完成状态才返回非 None）
+        assert pipeline._load_checkpoint("test_003", 1) is not None
+        assert pipeline._load_checkpoint("test_003", 8) is not None
         
         # 第二次执行相同任务（应从检查点加载）
         result2 = await pipeline.run(
@@ -323,3 +323,97 @@ class TestPipelineEdgeCases:
         assert result.status == PipelineState.ERROR
         assert result.steps[0].status == StepStatus.ERROR
         assert "timeout" in result.steps[0].error.lower()
+
+
+class TestCheckpointRobustness:
+    """检查点健壮性测试（审查 S9 缺口补齐）"""
+
+    @pytest.fixture
+    def pipeline(self, tmp_path):
+        storage = tmp_path / "generate_storage"
+        return GeneratePipeline(storage_root=storage)
+
+    def _make_source(self, pipeline) -> str:
+        source_file = pipeline.storage_root / "test.SLDASM"
+        source_file.parent.mkdir(parents=True, exist_ok=True)
+        source_file.write_text("mock")
+        return str(source_file)
+
+    def _register_all_mock(self, pipeline, **overrides):
+        executors = {}
+        for cfg in STEP_CONFIGS:
+            executors[cfg.name] = overrides.get(cfg.name, MockExecutor(success=True))
+            pipeline.register_executor(cfg.name, executors[cfg.name])
+        return executors
+
+    @pytest.mark.asyncio
+    async def test_failed_step_not_saved_as_checkpoint(self, pipeline):
+        """失败步骤不写检查点，重跑时必须重新执行而非加载"""
+        failing = MockExecutor(success=False)
+        # Step1 retryable=True, max_retries=2 → 首次失败即终止的步骤用 Step2 验证
+        executors = self._register_all_mock(
+            pipeline, **{StepName.GEOMETRY_PARSE: failing}
+        )
+        source = self._make_source(pipeline)
+
+        result1 = await pipeline.run("t_fail", source, TaskConfig())
+        assert result1.status == PipelineState.ERROR
+        assert result1.steps[1].is_failed
+
+        # 失败步骤不应产生可用检查点
+        assert pipeline._load_checkpoint("t_fail", 2) is None
+        # 成功的前序步骤检查点应存在
+        assert pipeline._load_checkpoint("t_fail", 1) is not None
+
+        # 修复执行器后重跑：Step2 必须重新执行，而非被当已完成加载
+        fixed = MockExecutor(success=True)
+        pipeline.register_executor(StepName.GEOMETRY_PARSE, fixed)
+        result2 = await pipeline.run("t_fail", source, TaskConfig())
+        assert result2.status == PipelineState.COMPLETED
+        assert fixed.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_count_accumulates(self, pipeline):
+        """retryable 步骤按 max_retries 重试且计数累加（审查 B5 回归）"""
+        failing = MockExecutor(success=False)
+        self._register_all_mock(pipeline, **{StepName.SW_LOAD: failing})
+        source = self._make_source(pipeline)
+
+        result = await pipeline.run("t_retry", source, TaskConfig())
+        assert result.status == PipelineState.ERROR
+        # max_retries=2 → 共 3 次尝试
+        assert failing.call_count == 3
+        assert result.steps[0].execution_count == 3
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_step_no_retry(self, pipeline):
+        """非 retryable 步骤失败不重试"""
+        failing = MockExecutor(success=False)
+        self._register_all_mock(pipeline, **{StepName.GEOMETRY_PARSE: failing})
+        source = self._make_source(pipeline)
+
+        result = await pipeline.run("t_noretry", source, TaskConfig())
+        assert result.status == PipelineState.ERROR
+        assert failing.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_corrupted_checkpoint_triggers_rerun(self, pipeline):
+        """检查点 JSON 损坏时视为无检查点重跑（审查 B6 回归）"""
+        executors = self._register_all_mock(pipeline)
+        source = self._make_source(pipeline)
+
+        result1 = await pipeline.run("t_corrupt", source, TaskConfig())
+        assert result1.status == PipelineState.COMPLETED
+
+        # 损坏 Step3 的检查点
+        cp = pipeline.storage_root / "t_corrupt" / "step_3" / "checkpoint.json"
+        cp.write_text("{broken json", encoding="utf-8")
+
+        for ex in executors.values():
+            ex.call_count = 0
+        result2 = await pipeline.run("t_corrupt", source, TaskConfig())
+        assert result2.status == PipelineState.COMPLETED
+        # Step3 重新执行，Step1/2 复用检查点
+        assert executors[StepName.VIEW_PROJECT].call_count == 1
+        assert executors[StepName.SW_LOAD].call_count == 0
+        assert executors[StepName.GEOMETRY_PARSE].call_count == 0

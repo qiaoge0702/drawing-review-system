@@ -10,10 +10,27 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 from app.generators.models import StepContext
+from app.generators.sw_com import run_sw
 from app.parsers.sw_parser import SWParser
 from app.core.exceptions import GenerationException, ErrorCode
 
 logger = logging.getLogger(__name__)
+
+
+def _get_bom_sync(filepath: str) -> list:
+    """【同步/COM线程】提取 BOM，parser 单次创建即释放"""
+    parser = SWParser()
+    try:
+        return parser.get_bom(filepath)
+    finally:
+        try:
+            parser.close_document(filepath)
+        except Exception as e:
+            logger.warning(f"Failed to close document: {e}")
+        try:
+            parser.quit()
+        except Exception as e:
+            logger.warning(f"Failed to quit SW parser: {e}")
 
 
 class GeometryParseExecutor:
@@ -28,9 +45,6 @@ class GeometryParseExecutor:
         "bounding_box": {...},  # 总体边界盒
     }
     """
-    
-    def __init__(self):
-        self._parser: SWParser | None = None
     
     async def __call__(self, ctx: StepContext) -> Dict[str, Any]:
         """
@@ -48,10 +62,7 @@ class GeometryParseExecutor:
         logger.info(f"[Task:{ctx.task_id}] Parsing geometry for {source_file}")
         
         try:
-            # 初始化 SW 连接
-            self._parser = SWParser()
-            
-            # 获取 BOM
+            # 获取 BOM（COM 调用卸载到专用线程）
             bom = await self._extract_bom(ctx, source_file)
             
             # 统计材料
@@ -108,38 +119,27 @@ class GeometryParseExecutor:
                 step_name="geometry_parse",
                 detail=str(e),
             )
-        finally:
-            if self._parser:
-                try:
-                    self._parser.close_document(source_file)
-                except Exception as e:
-                    logger.warning(f"[Task:{ctx.task_id}] Failed to close document: {e}")
     
     async def _extract_bom(self, ctx: StepContext, filepath: str) -> List[Dict[str, Any]]:
-        """提取 BOM 表"""
+        """提取 BOM 表（失败时抛错，不静默返回空表）"""
         logger.debug(f"[Task:{ctx.task_id}] Extracting BOM from {filepath}")
         
-        try:
-            raw_bom = self._parser.get_bom(filepath)
-            
-            # 标准化 BOM 数据
-            bom = []
-            for item in raw_bom:
-                bom.append({
-                    "level": item.get("level", 0),
-                    "name": item.get("name", ""),
-                    "path": item.get("path", ""),
-                    "quantity": item.get("quantity", 1),
-                    "is_suppressed": item.get("is_suppressed", False),
-                    # 尝试识别零件类型
-                    "type": self._guess_part_type(item.get("name", "")),
-                })
-            
-            return bom
-            
-        except Exception as e:
-            logger.error(f"[Task:{ctx.task_id}] BOM extraction failed: {e}")
-            return []
+        raw_bom = await run_sw(_get_bom_sync, filepath)
+        
+        # 标准化 BOM 数据
+        bom = []
+        for item in raw_bom:
+            bom.append({
+                "level": item.get("level", 0),
+                "name": item.get("name", ""),
+                "path": item.get("path", ""),
+                "quantity": item.get("quantity", 1),
+                "is_suppressed": item.get("is_suppressed", False),
+                # 尝试识别零件类型
+                "type": self._guess_part_type(item.get("name", "")),
+            })
+        
+        return bom
     
     @staticmethod
     def _guess_part_type(name: str) -> str:

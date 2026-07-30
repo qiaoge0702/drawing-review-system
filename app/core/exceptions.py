@@ -218,6 +218,9 @@ class SWException(GenerationException):
         message: str,
         error_code: ErrorCode = ErrorCode.GEN_SW_NOT_AVAILABLE,
         sw_version: Optional[str] = None,
+        task_id: Optional[str] = None,
+        step: Optional[int] = None,
+        step_name: Optional[str] = None,
         detail: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None
     ):
@@ -227,6 +230,9 @@ class SWException(GenerationException):
         super().__init__(
             message,
             error_code=error_code,
+            task_id=task_id,
+            step=step,
+            step_name=step_name,
             detail=detail,
             context=ctx,
             recoverable=error_code == ErrorCode.GEN_SW_TIMEOUT

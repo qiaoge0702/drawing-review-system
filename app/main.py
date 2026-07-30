@@ -8,6 +8,9 @@ API 列表：
   GET    /api/result/{task_id}  获取审查结果
   GET    /api/rules      获取生产规则
   PUT    /api/rules      更新生产规则
+  POST   /api/generate   创建图纸生成任务（M1 新增）
+  GET    /api/generate/{task_id}  生成任务详情
+  POST   /api/generate/{task_id}/rerun  单步重跑
   WS     /ws             WebSocket 进度推送
 """
 
@@ -41,6 +44,8 @@ from app.renderers.dxf_renderer import DXFRenderer
 from app.ai.analyzer import AIAnalyzer
 from app.rules.engine import RuleEngine, get_rule_engine
 from app.services.report_generator import get_report_generator
+from app.services.generation_service import GenerationService
+from app.routers import generate as generate_router
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +57,21 @@ rule_engine = get_rule_engine()
 # ─── 任务存储（内存，简单实现）───
 _tasks: Dict[str, Dict[str, Any]] = {}
 _websocket_connections: Dict[str, WebSocket] = {}
+
+
+async def _generation_notify(task_id: str, event: Dict[str, Any]):
+    """生成任务进度 → WS 推送"""
+    ws = _websocket_connections.get(task_id)
+    if ws:
+        try:
+            await ws.send_json({"task_id": task_id, **event})
+        except Exception:
+            pass
+
+
+# ─── 生成任务服务（单例）───
+generation_service = GenerationService(notify=_generation_notify)
+generate_router.init_service(generation_service)
 
 
 # ─── FastAPI 应用 ───
@@ -69,6 +89,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 生成系统路由（M1）
+app.include_router(generate_router.router)
 
 # 静态文件（前端模板）
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -91,6 +114,21 @@ async def index():
     if not index_path.exists():
         return HTMLResponse("<h1>模板文件不存在</h1>", status_code=404)
     return HTMLResponse(index_path.read_text(encoding="utf-8"))
+
+
+@app.get("/generate", response_class=HTMLResponse)
+async def generate_page():
+    """生成系统页面（M1）"""
+    page_path = TEMPLATES_DIR / "generate.html"
+    if not page_path.exists():
+        return HTMLResponse("<h1>模板文件不存在</h1>", status_code=404)
+    return HTMLResponse(page_path.read_text(encoding="utf-8"))
+
+
+# 静态资源
+STATIC_DIR = Path(__file__).parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 # ═══════════════════════════════════════════
@@ -546,7 +584,9 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
     except WebSocketDisconnect:
         logger.debug(f"WebSocket 断开: {task_id}")
     finally:
-        _websocket_connections.pop(task_id, None)
+        # S3: 仅在注册表中仍是本连接时才移除（同 task_id 多连接防误删）
+        if _websocket_connections.get(task_id) is websocket:
+            _websocket_connections.pop(task_id, None)
 
 
 async def _notify(task_id: str, message: str, progress: int):

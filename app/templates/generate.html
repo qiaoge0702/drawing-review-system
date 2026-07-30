@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>图纸生成系统 - 专用车辆上装设计图纸智能系统</title>
+    <style>
+        :root {
+            --bg: #f0f4f8; --surface: #ffffff;
+            --primary: #3b82f6; --primary-light: #dbeafe; --primary-dark: #2563eb;
+            --success: #22c55e; --warning: #f59e0b; --danger: #ef4444;
+            --text: #1e293b; --text-secondary: #64748b; --text-light: #94a3b8;
+            --border: #e2e8f0;
+            --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+            --radius: 12px; --radius-sm: 8px;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: var(--bg); color: var(--text); min-height: 100vh;
+        }
+        .topbar {
+            background: var(--surface); border-bottom: 1px solid var(--border);
+            padding: 12px 24px; display: flex; align-items: center; gap: 24px;
+        }
+        .topbar h1 { font-size: 18px; }
+        .topbar nav a { color: var(--text-secondary); text-decoration: none; margin-right: 16px; }
+        .topbar nav a.active { color: var(--primary); font-weight: 600; }
+        #ws-status { margin-left: auto; font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+        .ws-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        .ws-dot.on { background: var(--success); }
+        .ws-dot.off { background: var(--text-light); }
+
+        .layout { display: grid; grid-template-columns: 280px 1fr; gap: 16px; padding: 16px 24px; max-width: 1600px; margin: 0 auto; }
+        .panel { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; }
+
+        /* 创建任务 */
+        .create-form label { font-size: 13px; color: var(--text-secondary); display: block; margin: 10px 0 4px; }
+        .create-form input, .create-form select {
+            width: 100%; padding: 8px 10px; border: 1px solid var(--border);
+            border-radius: var(--radius-sm); font-size: 14px;
+        }
+        .btn {
+            background: var(--primary); color: #fff; border: none; border-radius: var(--radius-sm);
+            padding: 8px 18px; font-size: 14px; cursor: pointer; margin-top: 12px;
+        }
+        .btn:hover { background: var(--primary-dark); }
+        .btn:disabled { background: var(--text-light); cursor: not-allowed; }
+        .btn-sm { padding: 4px 12px; font-size: 13px; margin-top: 0; }
+        .btn-link { background: none; color: var(--primary); padding: 4px 8px; margin-top: 0; }
+
+        /* 步骤导航 */
+        .step-item {
+            display: flex; align-items: center; gap: 10px; padding: 10px;
+            border-radius: var(--radius-sm); cursor: pointer; margin-bottom: 4px;
+        }
+        .step-item:hover { background: var(--bg); }
+        .step-item.active { background: var(--primary-light); }
+        .step-icon { font-size: 16px; }
+        .step-title { font-size: 14px; font-weight: 500; }
+        .step-sub { font-size: 12px; color: var(--text-secondary); }
+
+        /* 进度 */
+        .progress-bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; margin-bottom: 6px; }
+        .progress-fill { height: 100%; background: var(--primary); transition: width 0.4s; }
+        .progress-text { font-size: 13px; color: var(--text-secondary); margin-bottom: 16px; }
+
+        /* 主内容 */
+        .empty { color: var(--text-light); text-align: center; padding: 60px 0; }
+        .kv { border-collapse: collapse; width: 100%; }
+        .kv td { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 14px; }
+        .kv td:first-child { color: var(--text-secondary); width: 120px; }
+        .step-header { display: flex; align-items: center; justify-content: space-between; }
+        .step-status-line { font-size: 13px; color: var(--text-secondary); margin: 8px 0 12px; }
+        .error-text { color: var(--danger); font-size: 13px; margin: 8px 0; word-break: break-all; }
+        .json-view {
+            background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: var(--radius-sm);
+            font-size: 12px; max-height: 400px; overflow: auto;
+        }
+        .artifact-list { list-style: none; margin: 8px 0 16px; }
+        .artifact-list li { padding: 4px 0; font-size: 14px; }
+        .artifact-img { max-width: 320px; display: block; margin: 6px 0; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+        .muted { color: var(--text-light); font-size: 13px; }
+        h4 { margin: 14px 0 6px; font-size: 14px; }
+
+        /* 历史 */
+        .history-item {
+            display: flex; gap: 10px; align-items: center; padding: 8px 10px;
+            border-radius: var(--radius-sm); cursor: pointer; font-size: 13px;
+        }
+        .history-item:hover { background: var(--bg); }
+        .history-id { font-family: monospace; }
+        .status-completed { color: var(--success); }
+        .status-error { color: var(--danger); }
+        .status-running, .status-queued { color: var(--warning); }
+        .section-title { font-size: 14px; font-weight: 600; margin: 20px 0 8px; display: flex; justify-content: space-between; align-items: center; }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <h1>图纸生成系统</h1>
+        <nav>
+            <a href="/">审查系统</a>
+            <a href="/generate" class="active">生成系统</a>
+        </nav>
+        <div id="ws-status"></div>
+    </div>
+
+    <div class="layout">
+        <!-- 左侧栏 -->
+        <div>
+            <div class="panel">
+                <div class="section-title">新建生成任务</div>
+                <div class="create-form">
+                    <label>SW 文件路径（.SLDASM / .SLDPRT）</label>
+                    <input id="source-file" type="text" placeholder="E:\path\to\model.SLDASM">
+                    <label>图纸类型</label>
+                    <select id="drawing-type">
+                        <option value="weldment">焊接件图</option>
+                        <option value="part">零件图</option>
+                        <option value="sub_assembly">部件装配图</option>
+                        <option value="total_assembly">总装配图</option>
+                    </select>
+                    <label>目标格式</label>
+                    <select id="target-format">
+                        <option value="dxf">DXF</option>
+                        <option value="dwg">DWG</option>
+                    </select>
+                    <button id="btn-create" class="btn">创建任务</button>
+                </div>
+            </div>
+
+            <div class="panel" style="margin-top:16px">
+                <div class="section-title">
+                    步骤导航
+                    <button id="btn-overview" class="btn btn-link">总览</button>
+                </div>
+                <div id="progress-area"></div>
+                <div id="step-nav"></div>
+            </div>
+
+            <div class="panel" style="margin-top:16px">
+                <div class="section-title">
+                    历史任务
+                    <button id="btn-refresh-history" class="btn btn-link">刷新</button>
+                </div>
+                <div id="history-list"></div>
+            </div>
+        </div>
+
+        <!-- 主内容区 -->
+        <div class="panel" id="main-content"></div>
+    </div>
+
+    <script type="module" src="/static/generate/js/main.js"></script>
+</body>
+</html>

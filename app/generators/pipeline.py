@@ -63,12 +63,26 @@ class GeneratePipeline:
         self.storage_root = storage_root or settings.storage.temp_dir / "generate"
         self.storage_root.mkdir(parents=True, exist_ok=True)
         self._step_executors: Dict[StepName, Any] = {}
+        self._progress_callback: Optional[Any] = None  # async cb(task_id, event: dict)
         logger.info(f"GeneratePipeline initialized, storage: {self.storage_root}")
     
     def register_executor(self, step_name: StepName, executor: Any):
         """注册步骤执行器"""
         self._step_executors[step_name] = executor
         logger.debug(f"Registered executor for {step_name.value}")
+    
+    def set_progress_callback(self, callback: Any):
+        """注册进度回调：async callable(task_id, event_dict)，每步状态变化时触发"""
+        self._progress_callback = callback
+    
+    async def _emit_progress(self, task_id: str, event: Dict[str, Any]):
+        """触发进度回调（异常不影响流水线）"""
+        if self._progress_callback is None:
+            return
+        try:
+            await self._progress_callback(task_id, event)
+        except Exception as e:
+            logger.warning(f"[Task:{task_id}] Progress callback error: {e}")
     
     async def run(
         self,
@@ -108,53 +122,67 @@ class GeneratePipeline:
             for step_num in range(1, 9):
                 step_config = STEP_CONFIGS[step_num - 1]
                 
-                # 检查是否已有完成的检查点
-                if self._has_checkpoint(task_id, step_num):
+                # 检查是否有可用的完成检查点（失败/损坏的不算）
+                checkpoint = self._load_checkpoint(task_id, step_num)
+                if checkpoint is not None:
                     logger.info(f"[Task:{task_id}] Step {step_num} found checkpoint, loading...")
-                    step_result = self._load_checkpoint(task_id, step_num)
-                    result.steps.append(step_result)
+                    result.steps.append(checkpoint)
                     result.current_step = step_num
                     result.progress = int(step_num / 8 * 100)
                     continue
                 
-                # 执行步骤
-                step_result = await self._execute_step(
-                    task_id=task_id,
-                    step_num=step_num,
-                    step_config=step_config,
-                    source_file=source_file,
-                    config=config,
-                    previous_results=result.steps,
-                )
+                # 执行步骤（含重试循环，重试次数累加）
+                await self._emit_progress(task_id, {
+                    "type": "step_start",
+                    "status": result.status.value,
+                    "current_step": step_num,
+                    "progress": result.progress,
+                    "step_name": step_config.name.value,
+                    "display_name": step_config.display_name,
+                })
+                max_attempts = 1 + (step_config.max_retries if step_config.retryable else 0)
+                step_result: Optional[StepResult] = None
+                for attempt in range(1, max_attempts + 1):
+                    if attempt > 1:
+                        logger.warning(
+                            f"[Task:{task_id}] Step {step_num} retry "
+                            f"{attempt - 1}/{step_config.max_retries}"
+                        )
+                    step_result = await self._execute_step(
+                        task_id=task_id,
+                        step_num=step_num,
+                        step_config=step_config,
+                        source_file=source_file,
+                        config=config,
+                        previous_results=result.steps,
+                        execution_count=attempt,
+                    )
+                    if step_result.is_success:
+                        break
                 
                 result.steps.append(step_result)
                 result.current_step = step_num
                 result.progress = int(step_num / 8 * 100)
                 
-                # 保存检查点
-                self._save_checkpoint(task_id, step_result)
+                # 仅成功的步骤保存检查点
+                if step_result.is_success:
+                    self._save_checkpoint(task_id, step_result)
+                
+                # 推送步骤进度
+                await self._emit_progress(task_id, {
+                    "type": "step",
+                    "status": result.status.value,
+                    "current_step": step_num,
+                    "progress": result.progress,
+                    "step": step_result.model_dump(mode="json"),
+                })
                 
                 # 步骤失败处理
                 if step_result.is_failed:
-                    if step_config.retryable and step_result.execution_count < step_config.max_retries:
-                        logger.warning(f"[Task:{task_id}] Step {step_num} failed, retrying...")
-                        # 简单重试逻辑
-                        step_result = await self._execute_step(
-                            task_id=task_id,
-                            step_num=step_num,
-                            step_config=step_config,
-                            source_file=source_file,
-                            config=config,
-                            previous_results=result.steps[:-1],
-                        )
-                        result.steps[-1] = step_result
-                        self._save_checkpoint(task_id, step_result)
-                    
-                    if step_result.is_failed:
-                        result.status = PipelineState.ERROR
-                        result.error = f"Step {step_num} failed: {step_result.error}"
-                        logger.error(f"[Task:{task_id}] Pipeline failed at step {step_num}: {step_result.error}")
-                        break
+                    result.status = PipelineState.ERROR
+                    result.error = f"Step {step_num} failed: {step_result.error}"
+                    logger.error(f"[Task:{task_id}] Pipeline failed at step {step_num}: {step_result.error}")
+                    break
             
             if result.status != PipelineState.ERROR:
                 result.status = PipelineState.COMPLETED
@@ -169,6 +197,15 @@ class GeneratePipeline:
         
         # 保存最终结果
         self._save_task_result(task_id, result)
+        
+        # 推送最终状态
+        await self._emit_progress(task_id, {
+            "type": "finished",
+            "status": result.status.value,
+            "current_step": result.current_step,
+            "progress": result.progress,
+            "error": result.error,
+        })
         
         return result
     
@@ -214,6 +251,7 @@ class GeneratePipeline:
         source_file: str,
         config: TaskConfig,
         previous_results: List[StepResult],
+        execution_count: int = 1,
     ) -> StepResult:
         """执行单个步骤"""
         step_name = step_config.name
@@ -227,7 +265,7 @@ class GeneratePipeline:
             name=step_name,
             status=StepStatus.RUNNING,
             started_at=datetime.utcnow(),
-            execution_count=1,
+            execution_count=execution_count,
         )
         
         start_time = datetime.utcnow()
@@ -239,7 +277,7 @@ class GeneratePipeline:
                 step=step_num,
                 step_name=step_name,
                 work_dir=step_dir,
-                parameters=config.model_dump(),
+                parameters={**config.model_dump(), "source_file": source_file},
                 previous_results={r.step: r.output_data for r in previous_results if r.output_data},
             )
             
@@ -296,27 +334,51 @@ class GeneratePipeline:
     
     # --- 检查点管理 ---
     
-    def _has_checkpoint(self, task_id: str, step: int) -> bool:
-        """检查是否存在检查点"""
-        checkpoint_file = self._get_step_dir(task_id, step) / "checkpoint.json"
-        return checkpoint_file.exists()
-    
     def _save_checkpoint(self, task_id: str, step_result: StepResult):
-        """保存步骤检查点"""
-        checkpoint_file = self._get_step_dir(task_id, step_result.step) / "checkpoint.json"
+        """保存步骤检查点（临时文件 + os.replace 原子落盘）"""
+        step_dir = self._get_step_dir(task_id, step_result.step)
+        step_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_file = step_dir / "checkpoint.json"
+        tmp_file = step_dir / "checkpoint.json.tmp"
         try:
-            with open(checkpoint_file, "w", encoding="utf-8") as f:
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(step_result.model_dump(), f, ensure_ascii=False, default=str, indent=2)
+            os.replace(tmp_file, checkpoint_file)
             logger.debug(f"[Task:{task_id}] Checkpoint saved for step {step_result.step}")
         except Exception as e:
             logger.warning(f"[Task:{task_id}] Failed to save checkpoint: {e}")
+            try:
+                tmp_file.unlink(missing_ok=True)
+            except Exception:
+                pass
     
-    def _load_checkpoint(self, task_id: str, step: int) -> StepResult:
-        """加载步骤检查点"""
+    def _load_checkpoint(self, task_id: str, step: int) -> Optional[StepResult]:
+        """
+        加载步骤检查点
+        
+        仅接受 status=COMPLETED 的检查点；文件缺失、JSON 损坏、
+        模型校验失败、状态非完成时一律返回 None（视为无检查点，重跑该步）。
+        """
         checkpoint_file = self._get_step_dir(task_id, step) / "checkpoint.json"
-        with open(checkpoint_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return StepResult(**data)
+        if not checkpoint_file.exists():
+            return None
+        try:
+            with open(checkpoint_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            step_result = StepResult(**data)
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.warning(
+                f"[Task:{task_id}] Corrupted checkpoint at step {step}, "
+                f"will re-execute: {e}"
+            )
+            return None
+        if step_result.status != StepStatus.COMPLETED:
+            logger.warning(
+                f"[Task:{task_id}] Checkpoint at step {step} not completed "
+                f"(status={step_result.status.value}), will re-execute"
+            )
+            return None
+        return step_result
     
     def _clear_checkpoint(self, task_id: str, step: int):
         """清除检查点"""
