@@ -9,7 +9,7 @@ from app.generators.steps.step3_view_project import ViewProjectExecutor
 from app.generators.models import StepContext
 from app.models.generation import StepName
 
-SRC = r"E:\147\workspaces\drawing-review-system\LB26拉臂装置\LB26.11202轴套.SLDPRT"
+SRC = r"E:\147\workspaces\drawing-review-system\LB26拉臂装置\LB26.11000底架焊合.SLDASM"
 WORK = Path(r"E:\147\workspaces\drawing-review-system\temp\integration_test\step_3")
 
 async def main():

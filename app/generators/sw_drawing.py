@@ -142,7 +142,7 @@ def extract_views_sync(source_file: str, view_names: Sequence[str],
 
             comps = view.GetVisibleComponents or []
             arr = list(view.ModelToViewTransform.ArrayData)
-            scale_decimal = float(view.ScaleDecimal or 1.0)
+            scale_decimal = float(view.ScaleDecimal or 1.0)  # 仅用于 scale 字段展示，不参与实体坐标
 
             edges_per_comp: List[List[Any]] = []
             hidden_per_comp: List[List[Any]] = []
@@ -156,7 +156,7 @@ def extract_views_sync(source_file: str, view_names: Sequence[str],
                     warnings.append(f"{name}: hidden_lines 取不到（{diag}）")
 
             entities, notes = extract_view_entities(
-                edges_per_comp, arr, scale_decimal, cfg.spline_sample_points)
+                edges_per_comp, arr, cfg.spline_sample_points)
             if not entities:
                 raise SWException(
                     f"No entities extracted for view: {name}",
@@ -165,7 +165,7 @@ def extract_views_sync(source_file: str, view_names: Sequence[str],
             warnings.extend(f"{name}: {n}" for n in notes)
 
             hidden_entities, hnotes = extract_view_entities(
-                hidden_per_comp, arr, scale_decimal, cfg.spline_sample_points)
+                hidden_per_comp, arr, cfg.spline_sample_points)
             warnings.extend(f"{name}: hidden {n}" for n in hnotes)
 
             views.append({

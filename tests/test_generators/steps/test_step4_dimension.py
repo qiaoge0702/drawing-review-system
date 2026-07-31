@@ -95,6 +95,7 @@ class TestDimensionExecutor:
             assert d["confidence"] == 1.0
             assert d["tolerance"]["grade"] == "IT14"
             assert d["associated_entities"]
+            assert d["view_name"] == "front"  # 所属视图名（Step7 定位用）
             assert set(d["position"]) == {"x1", "y1", "x2", "y2", "text_x", "text_y"}
 
     @pytest.mark.asyncio
@@ -193,6 +194,36 @@ class TestDimensionExecutor:
         result = await DimensionExecutor()(ctx)
         assert result["overlaps"] == []
         assert result["placement_score"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_placement_score_clamped_to_zero(self, tmp_path):
+        """大量重叠（重叠对数 > 标注数）→ placement_score clamp 到 0.0，不出现负分。
+        完整避让布局属 M4 AI 范围，M2 只做检测与评分。"""
+        # 4 个圆的直径标注线均与宽度标注线共线（y=-10）且区间相交：
+        # dims=6（2 外廓 + 4 直径），overlaps ≥ C(4,2)+4 = 10 > 6 → 未 clamp 会为负
+        circles = [
+            {"type": "circle", "cx": 40.0, "cy": -10.0, "r": 20.0},
+            {"type": "circle", "cx": 50.0, "cy": -10.0, "r": 20.0},
+            {"type": "circle", "cx": 60.0, "cy": -10.0, "r": 20.0},
+            {"type": "circle", "cx": 70.0, "cy": -10.0, "r": 20.0},
+        ]
+        view = _box_view(min_x=0.0, min_y=0.0, max_x=100.0, max_y=50.0,
+                         extra_entities=circles)
+        ctx = _make_ctx(tmp_path, {"views": [view]})
+        result = await DimensionExecutor()(ctx)
+
+        assert len(result["overlaps"]) > len(result["dimensions"])
+        assert result["placement_score"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_multi_view_view_name_populated(self, tmp_path):
+        """多视图：每条标注 view_name 指向所属视图"""
+        views = [_box_view("front"), _box_view("top", max_x=100.0, max_y=30.0)]
+        ctx = _make_ctx(tmp_path, {"views": views})
+        result = await DimensionExecutor()(ctx)
+        names = [d["view_name"] for d in result["dimensions"]]
+        assert names[:2] == ["front", "front"]
+        assert names[2:] == ["top", "top"]
 
     @pytest.mark.asyncio
     async def test_dimensions_json_artifact(self, tmp_path):

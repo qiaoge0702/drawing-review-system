@@ -65,8 +65,16 @@ class TestDefaultTemplate:
 
     def test_default_position(self, tmp_path):
         result = _run(tmp_path)
-        assert result["tech_requirements"]["position"] == {
-            "x": 50.0, "y": 400.0, "width": 350.0, "height": 150.0,
+        pos = result["tech_requirements"]["position"]
+        # 默认 position：图框左下角空白区，且在图幅内（y+height ≤ 287）
+        assert pos == {"x": 20.0, "y": 20.0, "width": 200.0, "height": 120.0}
+        assert pos["y"] + pos["height"] <= 287.0
+        assert pos["x"] + pos["width"] <= 410.0
+
+    def test_default_style(self, tmp_path):
+        result = _run(tmp_path)
+        assert result["tech_requirements"]["style"] == {
+            "font_size": 3.5, "line_spacing": 1.5,
         }
 
 
@@ -141,7 +149,21 @@ class TestConfig:
         })
         pos = result["tech_requirements"]["position"]
         assert pos["x"] == 10.0 and pos["y"] == 20.0
-        assert pos["width"] == 350.0 and pos["height"] == 150.0
+        assert pos["width"] == 200.0 and pos["height"] == 120.0
+
+    def test_style_override(self, tmp_path):
+        result = _run(tmp_path, {
+            "tech_config": {"style": {"font_size": 5.0}},
+        })
+        style = result["tech_requirements"]["style"]
+        assert style["font_size"] == 5.0
+        assert style["line_spacing"] == 1.5  # 未覆盖字段保持默认
+
+    def test_invalid_style_raises(self, tmp_path):
+        for bad in ({"style": {"font_size": -1}}, {"style": {"font_size": "big"}},
+                    {"style": "not-a-dict"}):
+            with pytest.raises(SWException):
+                _run(tmp_path, {"tech_config": bad})
 
     def test_invalid_position_raises(self, tmp_path):
         with pytest.raises(SWException):
@@ -167,7 +189,8 @@ class TestArtifact:
         assert data == result
 
         tr = data["tech_requirements"]
-        for key in ("template_id", "template_name", "variables", "content", "position"):
+        for key in ("template_id", "template_name", "variables", "content",
+                    "position", "style"):
             assert key in tr
         assert set(tr["position"]) == {"x", "y", "width", "height"}
 

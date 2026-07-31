@@ -161,7 +161,8 @@ class TestViewProjectExecutor:
         from app.generators.steps.step3_view_project import _compute_scale_denominator
         with pytest.raises(SWException):
             _compute_scale_denominator([])
-        zero_view = {"bounding_box": {"min_x": 0.0, "min_y": 0.0,
+        zero_view = {"name": "front",
+                     "bounding_box": {"min_x": 0.0, "min_y": 0.0,
                                       "max_x": 0.0, "max_y": 0.0}}
         with pytest.raises(SWException):
             _compute_scale_denominator([zero_view])

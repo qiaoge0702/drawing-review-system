@@ -81,6 +81,28 @@ class TestAggregateBom:
         assert rows[2]["purchased"] is True
 
 
+    def test_jbt_recognized_as_purchased(self):
+        """真实案例：JB/T 7940.1 油杯等标准件前缀均应识别为外购件"""
+        bom = [
+            _item("油杯 JB/T 7940.1", "C:/std/JBT7940-M10.SLDPRT", 2),
+            _item("油杯 JB╱T 7940.1", "C:/std/JBT7940B-M10.SLDPRT", 1),
+            _item("螺栓 GB╱T 5782", "C:/std/GBT5782.SLDPRT", 1),
+            _item("气缸 Q/320201ABC01", "C:/std/CYL.SLDPRT", 1),
+            _item("法兰 HG/T 20592", "C:/std/FLG.SLDPRT", 1),
+            _item("连接板", "C:/p/LB26.11001.SLDPRT", 1),
+        ]
+        rows = aggregate_bom(bom)
+        by_dn = {r["drawing_number"]: r for r in rows}
+        assert by_dn["JBT7940-M10"]["purchased"] is True
+        assert by_dn["JBT7940B-M10"]["purchased"] is True
+        assert by_dn["GBT5782"]["purchased"] is True
+        assert by_dn["CYL"]["purchased"] is True
+        assert by_dn["FLG"]["purchased"] is True
+        assert by_dn["LB26.11001"]["purchased"] is False
+        # 排序：非外购件在前
+        assert rows[0]["drawing_number"] == "LB26.11001"
+
+
 class TestDrawingNumberExtraction:
     def test_path_preferred(self):
         item = _item("任意名称", "D:/models/LB26.11000.SLDPRT")
@@ -107,8 +129,15 @@ class TestBomGenerateExecutor:
 
         table = result["bom_table"]
         assert table["columns"] == COLUMNS
-        assert table["position"] == {"x": 50.0, "y": 600.0, "width": 400.0, "height": 200.0}
+        # 默认 position：标题栏正上方、右对齐图框；height 按行数动态计算
+        # 3 行数据 → 20 + 3*15 = 65
+        assert table["position"] == {"x": 240.0, "y": 50.0, "width": 160.0, "height": 65.0}
+        # 表格在图幅内（A3 横向有效范围 [10,410]×[10,287]）
+        assert table["position"]["x"] + table["position"]["width"] <= 410.0
+        assert table["position"]["y"] + table["position"]["height"] <= 287.0
         assert table["style"]["header_height"] == 20.0
+        assert table["style"]["column_widths"] == [15.0, 45.0, 45.0, 15.0, 20.0, 20.0, 20.0, 20.0]
+        assert table["style"]["text_align"] == "left"
         assert result["source_total_items"] == 5
 
         rows = table["rows"]
@@ -149,7 +178,9 @@ class TestBomGenerateExecutor:
         result = await BomGenerateExecutor()(ctx)
         pos = result["bom_table"]["position"]
         assert pos["x"] == 100.0 and pos["y"] == 500.0
-        assert pos["width"] == 400.0  # 未覆盖字段保持默认
+        assert pos["width"] == 160.0  # 未覆盖字段保持默认
+        # height 始终按行数动态覆盖：1 行 × row_height 12 + header 20 = 32
+        assert pos["height"] == 32.0
         assert result["bom_table"]["style"]["row_height"] == 12.0
 
     @pytest.mark.asyncio
@@ -163,6 +194,52 @@ class TestBomGenerateExecutor:
         with pytest.raises(SWException) as exc:
             await BomGenerateExecutor()(ctx)
         assert exc.value.error_code == ErrorCode.GEN_INVALID_FILE
+
+    @pytest.mark.asyncio
+    async def test_column_widths_override_and_validation(self, tmp_path):
+        """column_widths 合法覆盖生效；长度不符/非正数 → SWException"""
+        ctx = _make_ctx(
+            tmp_path,
+            {"bom": [_item("A", "C:/p/A.SLDPRT")]},
+            parameters={"bom_config": {
+                "style": {"column_widths": [10, 40, 40, 10, 15, 15, 15, 15],
+                          "text_align": "center"},
+            }},
+        )
+        result = await BomGenerateExecutor()(ctx)
+        style = result["bom_table"]["style"]
+        assert style["column_widths"] == [10.0, 40.0, 40.0, 10.0, 15.0, 15.0, 15.0, 15.0]
+        assert style["text_align"] == "center"
+
+        # 长度不符 → SWException
+        ctx_bad = _make_ctx(
+            tmp_path,
+            {"bom": [_item("A", "C:/p/A.SLDPRT")]},
+            parameters={"bom_config": {"style": {"column_widths": [10, 20, 30]}}},
+        )
+        with pytest.raises(SWException) as exc:
+            await BomGenerateExecutor()(ctx_bad)
+        assert exc.value.error_code == ErrorCode.GEN_INVALID_FILE
+
+        # 含非正数 → SWException
+        ctx_bad2 = _make_ctx(
+            tmp_path,
+            {"bom": [_item("A", "C:/p/A.SLDPRT")]},
+            parameters={"bom_config": {"style": {
+                "column_widths": [10, 40, 40, 10, 15, 15, 15, -5]}}},
+        )
+        with pytest.raises(SWException):
+            await BomGenerateExecutor()(ctx_bad2)
+
+    @pytest.mark.asyncio
+    async def test_height_dynamic_by_rows(self, tmp_path):
+        """config 静态 height 不生效：height = header_height + rows×row_height"""
+        bom = [_item(f"件{i}", f"C:/p/P{i:02d}.SLDPRT") for i in range(5)]
+        ctx = _make_ctx(
+            tmp_path, {"bom": bom},
+            parameters={"bom_config": {"position": {"height": 999}}})
+        result = await BomGenerateExecutor()(ctx)
+        assert result["bom_table"]["position"]["height"] == 20.0 + 5 * 15.0
 
     @pytest.mark.asyncio
     async def test_missing_step2_raises(self, tmp_path):

@@ -8,6 +8,11 @@ M2 范围（规则驱动，非 AI）：
   * 弧（arc）  → 半径标注（prefix R）
 - 线性标注位置：延伸线取实体端点（外廓标注取 bounding_box 角点），
   标注线偏移视图 bounding_box 外 dimension_offset（默认 10mm），文字居中
+- 坐标系声明：dimensions[].position 为**视图局部坐标**（与 views.json entities
+  同坐标系：原点 = 视图 bounding_box 左下角，实际尺寸 mm），落图变换同
+  Step7 视图公式（图纸坐标 = view_position + position × scale_factor）；
+  view_name 字段标识所属视图（Step7 优先用其定位，associated_entities 前缀
+  解析为回退）
 - 公差：默认未注公差 grade（dimension_config 指定，默认 IT14），
   confidence=1.0（规则生成）。AI 公差推荐属 M4，本步不实现
 - 重叠检测：同视图同朝向标注线区间相交 → overlaps[]（severity=warning），
@@ -121,7 +126,8 @@ def _entity_ref(view_name: str, index: int) -> str:
 
 def _make_dimension(dim_id: str, dim_type: str, value: float,
                     position: Dict[str, float], associated: List[str],
-                    cfg: Dict[str, Any], prefix: Optional[str] = None) -> Dict[str, Any]:
+                    cfg: Dict[str, Any], prefix: Optional[str] = None,
+                    view_name: Optional[str] = None) -> Dict[str, Any]:
     dim: Dict[str, Any] = {
         "id": dim_id,
         "type": dim_type,
@@ -132,11 +138,14 @@ def _make_dimension(dim_id: str, dim_type: str, value: float,
             "lower": cfg["lower"],
             "grade": cfg["grade"],
         },
+        # 视图局部坐标（原点 = 视图 bbox 左下角，实际尺寸 mm；见模块 docstring）
         "position": {k: round(float(v), 4) for k, v in position.items()},
         "associated_entities": associated,
         "is_automatic": True,
         "confidence": 1.0,
     }
+    if view_name is not None:
+        dim["view_name"] = view_name
     if prefix is not None:
         dim["prefix"] = prefix
     return dim
@@ -191,7 +200,7 @@ def extract_view_dimensions(view: Dict[str, Any], cfg: Dict[str, Any],
         next_id(), "linear", width,
         {"x1": bb["min_x"], "y1": dim_y, "x2": bb["max_x"], "y2": dim_y,
          "text_x": (bb["min_x"] + bb["max_x"]) / 2, "text_y": dim_y},
-        outline_refs, cfg))
+        outline_refs, cfg, view_name=name))
 
     # 高度标注：延伸线取左边两个角点，标注线在 bbox 左侧 offset
     dim_x = bb["min_x"] - offset
@@ -199,7 +208,7 @@ def extract_view_dimensions(view: Dict[str, Any], cfg: Dict[str, Any],
         next_id(), "linear", height,
         {"x1": dim_x, "y1": bb["min_y"], "x2": dim_x, "y2": bb["max_y"],
          "text_x": dim_x, "text_y": (bb["min_y"] + bb["max_y"]) / 2},
-        outline_refs, cfg))
+        outline_refs, cfg, view_name=name))
 
     # 2) 圆 → 直径标注；弧 → 半径标注
     for i, e in enumerate(entities):
@@ -215,7 +224,7 @@ def extract_view_dimensions(view: Dict[str, Any], cfg: Dict[str, Any],
                 next_id(), "diameter", 2 * r,
                 {"x1": cx - r, "y1": cy, "x2": cx + r, "y2": cy,
                  "text_x": cx, "text_y": cy + r + offset},
-                [_entity_ref(name, i)], cfg, prefix="⌀"))
+                [_entity_ref(name, i)], cfg, prefix="⌀", view_name=name))
         elif etype == "arc":
             cx, cy, r = e["cx"], e["cy"], e["r"]
             if r <= 0:
@@ -227,7 +236,7 @@ def extract_view_dimensions(view: Dict[str, Any], cfg: Dict[str, Any],
                 next_id(), "radius", r,
                 {"x1": cx, "y1": cy, "x2": cx + r, "y2": cy,
                  "text_x": cx + r / 2, "text_y": cy + offset},
-                [_entity_ref(name, i)], cfg, prefix="R"))
+                [_entity_ref(name, i)], cfg, prefix="R", view_name=name))
         elif etype == "line":
             continue  # 外廓标注已覆盖；单段线特征识别属后续里程碑
         else:
@@ -314,7 +323,9 @@ class DimensionExecutor:
                 step=ctx.step,
             )
 
-        placement_score = round(1.0 - len(all_overlaps) / len(all_dims), 4)
+        # clamp 到 [0,1]：重叠对数可超过标注数（两两组合），不允许负分；
+        # 完整避让布局属 M4 AI 范围，M2 只做检测与评分
+        placement_score = max(0.0, round(1.0 - len(all_overlaps) / len(all_dims), 4))
         result: Dict[str, Any] = {
             "dimensions": all_dims,
             "placement_score": placement_score,

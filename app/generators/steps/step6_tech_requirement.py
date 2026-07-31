@@ -9,7 +9,9 @@ M2 范围（规则驱动模板系统，非 AI）：
 - 变量覆盖：ctx.parameters["tech_variables"] 字典覆盖默认变量；
   模板中出现但既无默认值也未被覆盖 → SWException（禁止静默留空/原样输出占位符）；
   多余覆盖变量（模板未用）→ logger.warning 记录但不报错
-- position：契约默认值，可 ctx.parameters["tech_config"]["position"] 覆盖
+- position：契约默认值（图幅内定位：图框左下角空白区，图纸坐标 mm，
+  原点图框左下角、Y 向上），可 ctx.parameters["tech_config"]["position"] 覆盖；
+  style：默认 {"font_size": 3.5, "line_spacing": 1.5}，可 tech_config.style 覆盖
   （非法值显式报错，与 step4/5 同款模式）
 - 输出顶层结构严格按契约，附加 available_templates（模板 id 列表）
 
@@ -30,8 +32,12 @@ logger = logging.getLogger(__name__)
 # 默认模板（LB26 为焊接件场景）
 _DEFAULT_TEMPLATE_ID = "weldment_general"
 
-# position 契约默认值
-_DEFAULT_POSITION = {"x": 50.0, "y": 400.0, "width": 350.0, "height": 150.0}
+# position 契约默认值：图框左下角空白区（图纸坐标 mm，A3 横向有效范围
+# [10,410]×[10,287]）
+_DEFAULT_POSITION = {"x": 20.0, "y": 20.0, "width": 200.0, "height": 120.0}
+
+# style 契约默认值（font_size 单位 mm，line_spacing 为行距倍数）
+_DEFAULT_STYLE = {"font_size": 3.5, "line_spacing": 1.5}
 
 # 变量占位符语法 {var_name}
 _VAR_PATTERN = re.compile(r"\{(\w+)\}")
@@ -80,8 +86,8 @@ TECH_TEMPLATES: Dict[str, Dict[str, Any]] = {
 }
 
 
-def _parse_tech_config(ctx: StepContext) -> Dict[str, float]:
-    """解析并校验 tech_config 参数（position 覆盖），非法值显式报错"""
+def _parse_tech_config(ctx: StepContext) -> Dict[str, Dict[str, Any]]:
+    """解析并校验 tech_config 参数（position/style 覆盖），非法值显式报错"""
     cfg = ctx.parameters.get("tech_config") or {}
     if not isinstance(cfg, dict):
         raise SWException(
@@ -113,7 +119,31 @@ def _parse_tech_config(ctx: StepContext) -> Dict[str, float]:
                     step=ctx.step,
                 )
             position[key] = float(val)
-    return position
+
+    style = dict(_DEFAULT_STYLE)
+    style_override = cfg.get("style")
+    if style_override is not None:
+        if not isinstance(style_override, dict):
+            raise SWException(
+                f"tech_config.style must be a dict, got {type(style_override).__name__}",
+                error_code=ErrorCode.GEN_INVALID_FILE,
+                task_id=ctx.task_id,
+                step=ctx.step,
+            )
+        for key in _DEFAULT_STYLE:
+            if key not in style_override:
+                continue
+            val = style_override[key]
+            if not isinstance(val, (int, float)) or isinstance(val, bool) or val <= 0:
+                raise SWException(
+                    f"tech_config.style.{key} must be a positive number, got {val!r}",
+                    error_code=ErrorCode.GEN_INVALID_FILE,
+                    task_id=ctx.task_id,
+                    step=ctx.step,
+                )
+            style[key] = float(val)
+
+    return {"position": position, "style": style}
 
 
 def _parse_tech_variables(ctx: StepContext) -> Dict[str, str]:
@@ -209,7 +239,7 @@ class TechRequirementExecutor:
     """
 
     async def __call__(self, ctx: StepContext) -> Dict[str, Any]:
-        position = _parse_tech_config(ctx)
+        tech_cfg = _parse_tech_config(ctx)
         overrides = _parse_tech_variables(ctx)
         template = _select_template(ctx)
 
@@ -224,7 +254,8 @@ class TechRequirementExecutor:
                 "template_name": template["template_name"],
                 "variables": rendered["variables"],
                 "content": rendered["content"],
-                "position": position,
+                "position": tech_cfg["position"],
+                "style": tech_cfg["style"],
             },
             "available_templates": sorted(TECH_TEMPLATES),
         }

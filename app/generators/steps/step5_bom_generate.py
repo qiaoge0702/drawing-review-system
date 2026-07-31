@@ -12,10 +12,15 @@ M2 范围（规则驱动，非 AI）：
   * 数量：聚合后总数
   * 材料/单重：Step2 无单件数据 → 留空字符串（诚实原则，禁止编造）
   * 总重：单重×数量（单重空则空）
-  * 备注：name 含 "GB/T" → "外购"（外购件识别）
+  * 备注：name 含标准件前缀（GB/T、JB/T、HG/T、Q/ 等，见 _PURCHASED_PREFIXES）
+    → "外购"（外购件识别）
 - 排序：装配件（非外购）在前、标准件（外购）在后，同级按图号字典序
 - position/style：契约默认值，可由 ctx.parameters["bom_config"] 覆盖
   （非法值显式报错，与 step4 _parse_dimension_config 同款模式）
+  * position 默认图幅内定位（图纸坐标，原点图框左下角，Y 向上，mm）：
+    标题栏正上方、右对齐图框（标题栏位于图框右下角，高 40mm 从 y=10 起，
+    BOM 表底边贴标题栏顶边 y=50）；height 由 executor 按实际行数动态覆盖
+    （header_height + rows*row_height），config 给的静态 height 不生效
 
 纯数据处理，不依赖 SW COM，可在无 SW 环境单测。
 """
@@ -34,16 +39,21 @@ logger = logging.getLogger(__name__)
 _COLUMNS = ["序号", "图号", "名称", "数量", "材料", "单重", "总重", "备注"]
 
 # position/style 契约默认值
-_DEFAULT_POSITION = {"x": 50.0, "y": 600.0, "width": 400.0, "height": 200.0}
+# position：图幅内定位——标题栏正上方、右对齐图框（图纸坐标 mm，A3 横向有效
+# 范围 [10,410]×[10,287]）；height 为占位值，executor 按实际行数动态覆盖
+_DEFAULT_POSITION = {"x": 240.0, "y": 50.0, "width": 160.0, "height": 200.0}
 _DEFAULT_STYLE = {
     "header_height": 20.0,
     "row_height": 15.0,
     "font_size": 3.5,
     "border_width": 0.25,
 }
+# 列宽（mm，与 _COLUMNS 8 列一一对应）与文字对齐
+_DEFAULT_COLUMN_WIDTHS = [15.0, 45.0, 45.0, 15.0, 20.0, 20.0, 20.0, 20.0]
+_DEFAULT_TEXT_ALIGN = "left"
 
-# 外购件（标准件）识别标记
-_PURCHASED_TAG = "GB/T"
+# 外购件（标准件）识别前缀集合（GB/T、JB/T、HG/T、企业标准 Q/ 等）
+_PURCHASED_PREFIXES = ("GB/T", "GB╱T", "JB/T", "JB╱T", "HG/T", "Q/")
 _PURCHASED_REMARK = "外购"
 
 
@@ -82,6 +92,8 @@ def _parse_bom_config(ctx: StepContext) -> Dict[str, Any]:
             position[key] = float(val)
 
     style = dict(_DEFAULT_STYLE)
+    style["column_widths"] = list(_DEFAULT_COLUMN_WIDTHS)
+    style["text_align"] = _DEFAULT_TEXT_ALIGN
     style_override = cfg.get("style")
     if style_override is not None:
         if not isinstance(style_override, dict):
@@ -103,6 +115,30 @@ def _parse_bom_config(ctx: StepContext) -> Dict[str, Any]:
                     step=ctx.step,
                 )
             style[key] = float(val)
+        if "column_widths" in style_override:
+            cw = style_override["column_widths"]
+            if (not isinstance(cw, (list, tuple))
+                    or len(cw) != len(_COLUMNS)
+                    or any(not isinstance(v, (int, float)) or isinstance(v, bool)
+                           or v <= 0 for v in cw)):
+                raise SWException(
+                    f"bom_config.style.column_widths must be a positive number array "
+                    f"of length {len(_COLUMNS)}, got {cw!r}",
+                    error_code=ErrorCode.GEN_INVALID_FILE,
+                    task_id=ctx.task_id,
+                    step=ctx.step,
+                )
+            style["column_widths"] = [float(v) for v in cw]
+        if "text_align" in style_override:
+            ta = style_override["text_align"]
+            if not isinstance(ta, str) or not ta.strip():
+                raise SWException(
+                    f"bom_config.style.text_align must be a non-empty str, got {ta!r}",
+                    error_code=ErrorCode.GEN_INVALID_FILE,
+                    task_id=ctx.task_id,
+                    step=ctx.step,
+                )
+            style["text_align"] = ta.strip()
 
     return {"position": position, "style": style}
 
@@ -149,7 +185,7 @@ def _extract_drawing_number(item: Dict[str, Any]) -> str:
 
 
 def _is_purchased(name: str) -> bool:
-    return _PURCHASED_TAG in name
+    return any(tag in name for tag in _PURCHASED_PREFIXES)
 
 
 def aggregate_bom(bom: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -244,6 +280,12 @@ class BomGenerateExecutor:
                 total_weight,
                 remark,
             ])
+
+        # BOM 高度按实际行数动态计算（此处 rows>=1，空表已在前面抛错），
+        # 覆盖 config 给的静态 height，保证表格始终贴在标题栏正上方
+        cfg["position"]["height"] = (
+            cfg["style"]["header_height"] + cfg["style"]["row_height"] * len(rows)
+        )
 
         result: Dict[str, Any] = {
             "bom_table": {

@@ -5,10 +5,15 @@
 LineParams / CircleParams / GetCurveParams3 / Evaluate），
 输出为契约 views.json 实体字典（line / circle / arc）。
 
-关键坑（侦察报告 2026-07-30）：
+关键坑（侦察报告 2026-07-30 + 2026-07-31 真机根因修正）：
 - curve.Identity 是属性不是方法
 - MultiplyTransform 在 pywin32 不可用 → 手动矩阵 apply_xform
-- 矩阵 16 维，第 13 元素（索引 12）为缩放
+- MathTransform.ArrayData 官方布局（16 元）：[0-8] 旋转 3×3（行主序）、
+  [9-11] 平移（视图在图纸上的放置位置，米）、[12] 视图比例（图纸:模型）。
+  【2026-07-31 根因修正】曾按 4×4 行主序误读（tx=arr[3], ty=arr[7], 除以 arr[12]），
+  在 1:1 零件上隐形；遇到模板 1:50 视图时 y≡x 且坐标放大 50 倍（LB26.11000 出现
+  100000×100000mm 假 bbox）。契约实体 = 模型实际尺寸 mm：只取旋转分量，
+  图纸放置平移弃用（Step3 统一归一化），视图比例弃用（比例由 Step3 布局引擎决策）
 - INTERSECTION(3004) 等样条边：GetCurveParams3 参数范围 + Evaluate 采样离散折线
 - SW 模型坐标单位为米 → 契约输出毫米（×1000）
 """
@@ -33,15 +38,13 @@ _FULL_CIRCLE_TOL_M = 1e-9  # 起终点重合判定（米）
 
 def apply_xform(arr: Sequence[float], x: float, y: float, z: float) -> Tuple[float, float]:
     """
-    SW MathTransform 手动应用（pywin32 无 MultiplyTransform，侦察 probe_step8 验证版）
-    4x4 行主序: [r00 r01 r02 tx  r10 r11 r12 ty  r20 r21 r22 tz  0 0 0 scale]
-    返回视图 2D 坐标（米）。
+    SW MathTransform 手动应用（2026-07-31 真机根因修正版）
+    ArrayData 官方布局: [0-8] 旋转 3×3 行主序, [9-11] 图纸放置平移(米), [12] 视图比例。
+    契约实体 = 视图局部实际尺寸（米，调用方 ×1000）：只取旋转分量；
+    平移（图纸放置位置）与视图比例均弃用——比例是 Step3 布局引擎的决策。
     """
-    rx = arr[0] * x + arr[1] * y + arr[2] * z + arr[3]
-    ry = arr[4] * x + arr[5] * y + arr[6] * z + arr[7]
-    s = arr[12] if len(arr) > 12 else 1.0
-    if s and s != 1.0:
-        rx, ry = rx / s, ry / s
+    rx = arr[0] * x + arr[1] * y + arr[2] * z
+    ry = arr[3] * x + arr[4] * y + arr[5] * z
     return rx, ry
 
 
@@ -97,10 +100,10 @@ def _sample_spline(edge: Any, curve: Any, arr: Sequence[float],
     return pts
 
 
-def edge_to_entities(edge: Any, arr: Sequence[float], scale_decimal: float = 1.0,
+def edge_to_entities(edge: Any, arr: Sequence[float],
                      spline_samples: int = 50) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """
-    单条视图边 → 契约实体列表。
+    单条视图边 → 契约实体列表（坐标为实际尺寸 mm，不含视图比例）。
 
     Returns:
         (entities, note)  note 非空表示该边未能提取（如实上报，不静默）
@@ -124,7 +127,8 @@ def edge_to_entities(edge: Any, arr: Sequence[float], scale_decimal: float = 1.0
         try:
             cp = curve.CircleParams  # [cx,cy,cz, ax,ay,az, radius]
             center = _pt2d(arr, cp[0:3])
-            radius = round(float(cp[6]) * M_TO_MM * scale_decimal, 4)
+            # 半径 = 实际尺寸 mm（不乘视图比例，比例由 Step3 布局引擎决策）
+            radius = round(float(cp[6]) * M_TO_MM, 4)
         except Exception as e:
             return [], f"CIRCLE params failed: {e}"
         ep = _endpoints_from_curve(edge, curve)
@@ -153,7 +157,6 @@ def edge_to_entities(edge: Any, arr: Sequence[float], scale_decimal: float = 1.0
 
 
 def extract_view_entities(edges_per_comp: Sequence[Sequence[Any]], arr: Sequence[float],
-                          scale_decimal: float = 1.0,
                           spline_samples: int = 50) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
     多组件边集合 → 契约实体列表（装配体逐组件提取，实体扁平合并）
@@ -165,7 +168,7 @@ def extract_view_entities(edges_per_comp: Sequence[Sequence[Any]], arr: Sequence
     notes: List[str] = []
     for ci, edges in enumerate(edges_per_comp):
         for edge in (edges or []):
-            ents, note = edge_to_entities(edge, arr, scale_decimal, spline_samples)
+            ents, note = edge_to_entities(edge, arr, spline_samples)
             entities.extend(ents)
             if note:
                 notes.append(f"comp{ci}: {note}")

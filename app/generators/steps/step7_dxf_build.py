@@ -22,8 +22,9 @@ M2 范围（严格遵循 docs/plans/04-二维生成可视化模块.md 第六节�
   实体，用三线+文字组合绘制（延伸线×2 + 标注线 + TEXT 写 value+公差），全部落"标注"层。
   理由：ezdxf DIMENSION 实体渲染依赖 CAD 内核（各软件重算标注几何），
   三线方案为纯基本实体，跨软件（AutoCAD/中望/ODA 查看器）所见即所得。
-  标注 position 为视图局部坐标，按 associated_entities 前缀（"<view>_e<n>"）
-  推断所属视图后套用同一落图公式（含比例）；无法推断时按原坐标落图并 warning
+  标注 position 为视图局部坐标，优先按 view_name 字段定位所属视图
+  （associated_entities 前缀 "<view>_e<n>" 解析为回退，兼容旧数据），
+  套用同一落图公式（含比例）；无法定位时按原坐标落图并 warning
 - BOM 表格落图（消费 Step5 bom.json，可缺）：按 position/style 画表格线 +
   单元格 TEXT，落"BOM"层，列宽均分
 - 技术要求落图（消费 Step6 tech_requirements.json，可缺）：TEXT 逐行落
@@ -388,7 +389,12 @@ class DxfBuildExecutor:
 
     def _infer_view_name(self, dim: Dict[str, Any],
                          views_by_name: Dict[str, Any]) -> Optional[str]:
-        """按 associated_entities 前缀（'<view>_e<n>'）推断所属视图"""
+        """定位标注所属视图：优先用 Step4 新增的 view_name 字段（M2 修复包后
+        契约字段）；缺失/无效时回退 associated_entities 前缀（'<view>_e<n>'）
+        解析，兼容旧 dimensions.json 数据"""
+        vn = dim.get("view_name")
+        if isinstance(vn, str) and vn in views_by_name:
+            return vn
         for ref in dim.get("associated_entities") or []:
             if isinstance(ref, str) and "_e" in ref:
                 prefix = ref.rsplit("_e", 1)[0]

@@ -25,11 +25,12 @@ from app.generators.view_extractor import (
 from app.models.generation import StepName
 from app.core.exceptions import SWException, ErrorCode
 
-# 前视矩阵：模型(x,y,z) → 视图(x,z)，无缩放
-FRONT_ARR = [1, 0, 0, 0,
-             0, 0, 1, 0,
-             0, -1, 0, 0,
-             0, 0, 0, 1]
+# 前视矩阵（SW 官方 ArrayData 布局）：旋转[0-8]=(x,y,z)→(x,z)，平移[9-11]=0，比例[12]=1
+FRONT_ARR = [1, 0, 0,
+             0, 0, 1,
+             0, -1, 0,
+             0, 0, 0,
+             1, 0, 0, 0]
 
 
 # ---------- Fake COM 对象 ----------
@@ -188,20 +189,27 @@ def _run_direct(fake_app):
 # ---------- 矩阵变换 ----------
 
 class TestApplyXform:
-    def test_identity_rotation_translation(self):
-        arr = [1, 0, 0, 10,
-               0, 1, 0, 20,
-               0, 0, 1, 30,
-               0, 0, 0, 1]
-        assert apply_xform(arr, 1.0, 2.0, 3.0) == (11.0, 22.0)
+    def test_identity_rotation(self):
+        # SW 官方布局：旋转=[0-8]，平移=[9-11]（图纸放置，弃用），比例=[12]（弃用）
+        arr = [1, 0, 0,
+               0, 1, 0,
+               0, 0, 1,
+               10, 20, 30,   # 图纸放置平移（米），不进入实体坐标
+               1, 0, 0, 0]
+        assert apply_xform(arr, 1.0, 2.0, 3.0) == (1.0, 2.0)
 
     def test_front_view_maps_xz(self):
         assert apply_xform(FRONT_ARR, 1.0, 2.0, 3.0) == (1.0, 3.0)
 
-    def test_scale_element_divides(self):
-        arr = list(FRONT_ARR)
-        arr[12] = 2.0
-        assert apply_xform(arr, 4.0, 0.0, 6.0) == (2.0, 3.0)
+    def test_scale_element_ignored(self):
+        """真机根因回归：视图比例（arr[12]，如模板 1:50 → 0.02）不得进入实体坐标"""
+        arr = [1, 0, 0,
+               0, 1, 0,
+               0, 0, 1,
+               0.1476, 0.1510, 0.065,  # 真实图纸放置平移
+               0.02, 0.0, 0.0, 0.0]     # 模板 1:50 视图比例
+        # 2m 模型点 → 仍是 2m（实际尺寸），不放大 50 倍、不含放置平移
+        assert apply_xform(arr, 2.0, 0.0, 0.0) == (2.0, 0.0)
 
 
 # ---------- 实体映射 ----------
@@ -233,10 +241,11 @@ class TestEdgeToEntities:
         assert arc["start_angle"] == pytest.approx(0.0)
         assert arc["end_angle"] == pytest.approx(90.0)
 
-    def test_circle_radius_scaled_by_view_scale(self):
+    def test_circle_radius_actual_mm_regardless_of_view_scale(self):
+        """真机根因回归：半径 = 实际尺寸 mm，不乘视图比例（scale_decimal 已移除）"""
         edge = _circle_edge((0.0, 0.0, 0.0), 0.01)
-        ents, _ = edge_to_entities(edge, FRONT_ARR, scale_decimal=2.0)
-        assert ents[0]["r"] == pytest.approx(20.0)
+        ents, _ = edge_to_entities(edge, FRONT_ARR)
+        assert ents[0]["r"] == pytest.approx(10.0)
 
     def test_spline_discretized_to_polyline(self):
         edge = _spline_edge()

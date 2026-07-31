@@ -22,7 +22,7 @@ Step 3: 视图投影
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from app.generators.models import StepContext
 from app.generators.sw_com import run_sw
@@ -176,10 +176,42 @@ def _normalize_view(view: Dict[str, Any], task_id: str = "") -> None:
     }
 
 
+def _tile_positions(sizes: List[Tuple[str, float, float]],
+                    den: float) -> Dict[str, Any]:
+    """按缩放后尺寸平铺排布（起始边距 20mm，超宽换行），返回图纸坐标 positions"""
+    positions: Dict[str, Any] = {}
+    x = y = _LAYOUT_MARGIN
+    row_h = 0.0
+    for name, w0, h0 in sizes:
+        w = round(w0 / den, 4)
+        h = round(h0 / den, 4)
+        if x + w > _SHEET_W - _LAYOUT_MARGIN and x > _LAYOUT_MARGIN:
+            x = _LAYOUT_MARGIN
+            y += row_h + _LAYOUT_GAP_Y
+            row_h = 0.0
+        positions[name] = {
+            "x": round(x, 4), "y": round(y, 4), "width": w, "height": h}
+        x += w + _LAYOUT_GAP_X
+        row_h = max(row_h, h)
+    return positions
+
+
+def _positions_fit(positions: Dict[str, Any]) -> bool:
+    """全部视图（含宽高范围）都落在图幅可用区内"""
+    eps = 1e-6
+    return all(
+        p["x"] >= -eps and p["y"] >= -eps
+        and p["x"] + p["width"] <= _SHEET_W - _LAYOUT_MARGIN + eps
+        and p["y"] + p["height"] <= _SHEET_H - _LAYOUT_MARGIN + eps
+        for p in positions.values()
+    )
+
+
 def _compute_scale_denominator(views: List[Dict[str, Any]], task_id: str = "") -> float:
     """
-    自动比例：所有视图最大实际尺寸 vs A3 图幅可用区域（减去边距），
-    向下取 GB 标准比例系列分母。空视图/零尺寸 → SWException（禁止静默）。
+    自动比例：按“全部视图适配单图幅”计算——对 GB 标准比例系列从小到大
+    模拟排布，第一个让所有视图（含间距/换行）落进 A3 可用区的比例胜出；
+    超出 1:100 仍装不下 → 截断并 warning。空视图/全零尺寸 → SWException。
     """
     if not views:
         raise SWException(
@@ -188,27 +220,24 @@ def _compute_scale_denominator(views: List[Dict[str, Any]], task_id: str = "") -
             task_id=task_id,
             step=3,
         )
-    max_w = max(v["bounding_box"]["max_x"] - v["bounding_box"]["min_x"] for v in views)
-    max_h = max(v["bounding_box"]["max_y"] - v["bounding_box"]["min_y"] for v in views)
-    if max(max_w, max_h) <= 0:
+    sizes = [
+        (v["name"],
+         v["bounding_box"]["max_x"] - v["bounding_box"]["min_x"],
+         v["bounding_box"]["max_y"] - v["bounding_box"]["min_y"])
+        for v in views
+    ]
+    if max(max(w, h) for _, w, h in sizes) <= 0:
         raise SWException(
-            f"Degenerate view size for scale computation: {max_w}x{max_h}",
+            f"Degenerate view size for scale computation: {sizes}",
             error_code=ErrorCode.GEN_STEP_FAILED,
             task_id=task_id,
             step=3,
         )
-    usable_w = _SHEET_W - 2 * _LAYOUT_MARGIN
-    usable_h = _SHEET_H - 2 * _LAYOUT_MARGIN
-    # 单维为零的扁平视图（如一条水平线）合法：只用正尺寸维度计算
-    needed = max(
-        max_w / usable_w if max_w > 0 else 0.0,
-        max_h / usable_h if max_h > 0 else 0.0,
-    )
     for n in _GB_SCALES:
-        if n >= needed:
+        if _positions_fit(_tile_positions(sizes, float(n))):
             return float(n)
-    logger.warning(f"[Task:{task_id}] step3: required scale 1:{needed:.1f} exceeds "
-                   f"GB series, clamped to 1:{_GB_SCALES[-1]}")
+    logger.warning(f"[Task:{task_id}] step3: views do not fit A3 even at "
+                   f"1:{_GB_SCALES[-1]}, clamped (layout may overflow)")
     return float(_GB_SCALES[-1])
 
 
@@ -216,29 +245,22 @@ def _build_layout(views: List[Dict[str, Any]], task_id: str = "") -> Dict[str, A
     """
     布局引擎（比例决策点）：
     1) 各视图实体归一化（原点 = 视图左下角，实际尺寸 mm）
-    2) 自动比例：最大视图尺寸 vs 图幅可用区域，向下取 GB 标准比例
+    2) 自动比例：模拟排布取第一个整图幅适配的 GB 标准比例
     3) view_positions 输出图纸坐标：按缩放后尺寸平铺（起始边距 20mm，超宽换行）
     """
     for vw in views:
         _normalize_view(vw, task_id)
     den = _compute_scale_denominator(views, task_id)
     scale_str = f"1:{den:g}"
-    positions: Dict[str, Any] = {}
-    x = y = _LAYOUT_MARGIN
-    row_h = 0.0
     for vw in views:
         vw["scale"] = scale_str
-        bb = vw["bounding_box"]
-        w = round((bb["max_x"] - bb["min_x"]) / den, 4)
-        h = round((bb["max_y"] - bb["min_y"]) / den, 4)
-        if x + w > _SHEET_W - _LAYOUT_MARGIN and x > _LAYOUT_MARGIN:
-            x = _LAYOUT_MARGIN
-            y += row_h + _LAYOUT_GAP_Y
-            row_h = 0.0
-        positions[vw["name"]] = {
-            "x": round(x, 4), "y": round(y, 4), "width": w, "height": h}
-        x += w + _LAYOUT_GAP_X
-        row_h = max(row_h, h)
+    sizes = [
+        (vw["name"],
+         vw["bounding_box"]["max_x"] - vw["bounding_box"]["min_x"],
+         vw["bounding_box"]["max_y"] - vw["bounding_box"]["min_y"])
+        for vw in views
+    ]
+    positions = _tile_positions(sizes, den)
     logger.info(f"[Task:{task_id}] step3 layout: scale={scale_str}, "
                 f"positions={ {k: (p['x'], p['y']) for k, p in positions.items()} }")
     return {"sheet_size": "A3", "orientation": "landscape", "view_positions": positions}

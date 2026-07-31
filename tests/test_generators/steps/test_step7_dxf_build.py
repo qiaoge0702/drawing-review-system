@@ -79,6 +79,7 @@ def _dimensions_result():
                 "tolerance": {"upper": 0.5, "lower": -0.5, "grade": "IT14"},
                 "position": {"x1": 0.0, "y1": -5.0, "x2": 100.0, "y2": -5.0,
                              "text_x": 50.0, "text_y": -8.0},
+                "view_name": "front",
                 "associated_entities": ["front_e0", "front_e1"],
                 "is_automatic": True,
                 "confidence": 1.0,
@@ -291,6 +292,38 @@ class TestFullBuild:
         assert len(center) == 1
         assert doc.layers.get("隐藏线").dxf.linetype == "HIDDEN"
         assert doc.layers.get("中心线").dxf.linetype == "CENTER"
+
+
+    @pytest.mark.asyncio
+    async def test_dim_view_name_preferred_over_prefix(self, tmp_path):
+        """view_name 字段优先定位视图（无 associated_entities 也能正确落图）"""
+        dims = _dimensions_result()
+        # 移除 associated_entities，仅留 view_name → 仍应按视图落图公式平移
+        dims["dimensions"][0]["associated_entities"] = []
+        ctx = _make_ctx(tmp_path, {3: _views_result(), 4: dims})
+        await DxfBuildExecutor()(ctx)
+        doc = ezdxf.readfile(tmp_path / "output" / "drawing.dxf")
+        dim_texts = [e for e in doc.modelspace()
+                     if e.dxftype() == "TEXT" and e.dxf.layer == "标注"]
+        assert len(dim_texts) == 1
+        insert = dim_texts[0].dxf.insert
+        assert abs(insert.x - 150.0) < 1e-6  # text (50,-8) → (150,142)
+        assert abs(insert.y - 142.0) < 1e-6
+
+    @pytest.mark.asyncio
+    async def test_dim_prefix_fallback_without_view_name(self, tmp_path):
+        """旧数据无 view_name：回退 associated_entities 前缀解析"""
+        dims = _dimensions_result()
+        del dims["dimensions"][0]["view_name"]
+        ctx = _make_ctx(tmp_path, {3: _views_result(), 4: dims})
+        await DxfBuildExecutor()(ctx)
+        doc = ezdxf.readfile(tmp_path / "output" / "drawing.dxf")
+        dim_texts = [e for e in doc.modelspace()
+                     if e.dxftype() == "TEXT" and e.dxf.layer == "标注"]
+        assert len(dim_texts) == 1
+        insert = dim_texts[0].dxf.insert
+        assert abs(insert.x - 150.0) < 1e-6
+        assert abs(insert.y - 142.0) < 1e-6
 
 
 class TestErrorAndDegrade:
