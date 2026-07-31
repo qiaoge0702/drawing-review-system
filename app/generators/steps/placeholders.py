@@ -5,11 +5,6 @@ M1 阶段仅提供流水线"可空跑"能力：每个占位执行器不实现真
 仅产出占位标记 + 透传前序步骤摘要，供状态机/检查点/重跑机制端到端验证。
 
 M2 起将逐文件替换为真实执行器：
-- step3_view_project.py    视图投影
-- step4_dimension.py       尺寸标注
-- step5_bom_generate.py    BOM生成
-- step6_tech_requirement.py 技术要求
-- step7_dxf_build.py       DXF构建
 - step8_review.py          审查闭环
 """
 
@@ -68,26 +63,6 @@ class PlaceholderExecutor:
 class ViewProjectExecutor(PlaceholderExecutor):
     """Step 3: 视图投影（占位）"""
     step_name = StepName.VIEW_PROJECT
-
-
-class DimensionExecutor(PlaceholderExecutor):
-    """Step 4: 尺寸标注（占位）"""
-    step_name = StepName.DIMENSION
-
-
-class BomGenerateExecutor(PlaceholderExecutor):
-    """Step 5: BOM生成（占位）"""
-    step_name = StepName.BOM_GENERATE
-
-
-class TechRequirementExecutor(PlaceholderExecutor):
-    """Step 6: 技术要求（占位）"""
-    step_name = StepName.TECH_REQUIREMENT
-
-
-class DxfBuildExecutor(PlaceholderExecutor):
-    """Step 7: DXF构建（占位）"""
-    step_name = StepName.DXF_BUILD
 
 
 class ReviewExecutor(PlaceholderExecutor):

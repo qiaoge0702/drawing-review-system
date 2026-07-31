@@ -10,6 +10,13 @@ Step 3: 视图投影
 先试 SW API，SW 不可用（GEN_SW_NOT_AVAILABLE）时回退 STL；其他错误直接上抛）
 
 契约不变：views.json 结构与 docs/plans/04 第二节一致
+
+坐标系约定（2026-07-31 老板确认，专业范式：模型空间 --scale/平移--> 图纸空间）：
+- entities/hidden_lines/center_lines：视图局部坐标（实际尺寸 mm），
+  原点 = 视图包围盒左下角（本模块 _build_layout 统一归一化，两条引擎路径同一契约）
+- scale：GB 标准比例字符串（如 "1:50"），由布局引擎按图幅可用区域自动计算
+- layout.view_positions：图纸坐标（A3 图幅 mm，已含比例），
+  Step7 落图公式：图纸坐标 = view_position + 实体局部坐标 × (1/比例分母)
 """
 
 import json
@@ -19,9 +26,19 @@ from typing import Any, Dict, List
 
 from app.generators.models import StepContext
 from app.generators.sw_com import run_sw
+from app.generators.view_extractor import bounding_box_of
 from app.core.exceptions import SWException, ErrorCode
 
 logger = logging.getLogger(__name__)
+
+# ---- 布局常量（单位：mm；图纸坐标系 = A3 横向图幅）----
+_SHEET_W = 420.0        # A3 横向宽
+_SHEET_H = 297.0        # A3 横向高
+_LAYOUT_MARGIN = 20.0   # 视图区起始边距
+_LAYOUT_GAP_X = 40.0    # 视图水平间距
+_LAYOUT_GAP_Y = 20.0    # 视图换行垂直间距
+# GB 标准缩小比例系列（1:N），自动比例向下取该系列
+_GB_SCALES = (1, 2, 2.5, 5, 10, 20, 50, 100)
 
 # 视图定义：投影平面 (u轴, v轴) 取三维坐标分量索引（X=0, Y=1, Z=2）
 # front: 沿 -Y 看，u=X v=Z；top: 沿 -Z 看，u=X v=Y；left: 沿 +X 看，u=Y v=Z
@@ -124,22 +141,106 @@ def project_mesh(mesh: Any, view_name: str) -> Dict[str, Any]:
     }
 
 
-def _build_layout(views: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """简单平铺布局：A3 横向，视图从左到右排列，超宽换行"""
+def _shift_entities(entities: List[Dict[str, Any]], dx: float, dy: float) -> None:
+    """实体坐标原地平移 (-dx, -dy)；按键存在性处理 line/circle/arc"""
+    for e in entities:
+        for kx, ky in (("x1", "y1"), ("x2", "y2"), ("cx", "cy")):
+            if kx in e and ky in e:
+                e[kx] = round(e[kx] - dx, 4)
+                e[ky] = round(e[ky] - dy, 4)
+
+
+def _normalize_view(view: Dict[str, Any], task_id: str = "") -> None:
+    """
+    实体坐标归一化：减去包围盒 min，原点对齐视图左下角。
+    entities/hidden_lines/center_lines 同步平移；bounding_box min 归零、max 变为宽高。
+    """
+    entities = view.get("entities") or []
+    if not entities:
+        raise SWException(
+            f"View '{view.get('name')}' has no entities to normalize",
+            error_code=ErrorCode.GEN_STEP_FAILED,
+            task_id=task_id,
+            step=3,
+        )
+    bb = bounding_box_of(entities)
+    dx, dy = bb["min_x"], bb["min_y"]
+    if dx or dy:
+        _shift_entities(entities, dx, dy)
+        _shift_entities(view.get("hidden_lines") or [], dx, dy)
+        _shift_entities(view.get("center_lines") or [], dx, dy)
+    view["bounding_box"] = {
+        "min_x": 0.0, "min_y": 0.0,
+        "max_x": round(bb["max_x"] - dx, 4),
+        "max_y": round(bb["max_y"] - dy, 4),
+    }
+
+
+def _compute_scale_denominator(views: List[Dict[str, Any]], task_id: str = "") -> float:
+    """
+    自动比例：所有视图最大实际尺寸 vs A3 图幅可用区域（减去边距），
+    向下取 GB 标准比例系列分母。空视图/零尺寸 → SWException（禁止静默）。
+    """
+    if not views:
+        raise SWException(
+            "No views for scale computation",
+            error_code=ErrorCode.GEN_STEP_FAILED,
+            task_id=task_id,
+            step=3,
+        )
+    max_w = max(v["bounding_box"]["max_x"] - v["bounding_box"]["min_x"] for v in views)
+    max_h = max(v["bounding_box"]["max_y"] - v["bounding_box"]["min_y"] for v in views)
+    if max(max_w, max_h) <= 0:
+        raise SWException(
+            f"Degenerate view size for scale computation: {max_w}x{max_h}",
+            error_code=ErrorCode.GEN_STEP_FAILED,
+            task_id=task_id,
+            step=3,
+        )
+    usable_w = _SHEET_W - 2 * _LAYOUT_MARGIN
+    usable_h = _SHEET_H - 2 * _LAYOUT_MARGIN
+    # 单维为零的扁平视图（如一条水平线）合法：只用正尺寸维度计算
+    needed = max(
+        max_w / usable_w if max_w > 0 else 0.0,
+        max_h / usable_h if max_h > 0 else 0.0,
+    )
+    for n in _GB_SCALES:
+        if n >= needed:
+            return float(n)
+    logger.warning(f"[Task:{task_id}] step3: required scale 1:{needed:.1f} exceeds "
+                   f"GB series, clamped to 1:{_GB_SCALES[-1]}")
+    return float(_GB_SCALES[-1])
+
+
+def _build_layout(views: List[Dict[str, Any]], task_id: str = "") -> Dict[str, Any]:
+    """
+    布局引擎（比例决策点）：
+    1) 各视图实体归一化（原点 = 视图左下角，实际尺寸 mm）
+    2) 自动比例：最大视图尺寸 vs 图幅可用区域，向下取 GB 标准比例
+    3) view_positions 输出图纸坐标：按缩放后尺寸平铺（起始边距 20mm，超宽换行）
+    """
+    for vw in views:
+        _normalize_view(vw, task_id)
+    den = _compute_scale_denominator(views, task_id)
+    scale_str = f"1:{den:g}"
     positions: Dict[str, Any] = {}
-    x = y = 20.0
+    x = y = _LAYOUT_MARGIN
     row_h = 0.0
     for vw in views:
+        vw["scale"] = scale_str
         bb = vw["bounding_box"]
-        w = round(bb["max_x"] - bb["min_x"], 4)
-        h = round(bb["max_y"] - bb["min_y"], 4)
-        if x + w > 400.0 and x > 20.0:
-            x = 20.0
-            y += row_h + 20.0
+        w = round((bb["max_x"] - bb["min_x"]) / den, 4)
+        h = round((bb["max_y"] - bb["min_y"]) / den, 4)
+        if x + w > _SHEET_W - _LAYOUT_MARGIN and x > _LAYOUT_MARGIN:
+            x = _LAYOUT_MARGIN
+            y += row_h + _LAYOUT_GAP_Y
             row_h = 0.0
-        positions[vw["name"]] = {"x": x, "y": y, "width": w, "height": h}
-        x += w + 40.0
+        positions[vw["name"]] = {
+            "x": round(x, 4), "y": round(y, 4), "width": w, "height": h}
+        x += w + _LAYOUT_GAP_X
         row_h = max(row_h, h)
+    logger.info(f"[Task:{task_id}] step3 layout: scale={scale_str}, "
+                f"positions={ {k: (p['x'], p['y']) for k, p in positions.items()} }")
     return {"sheet_size": "A3", "orientation": "landscape", "view_positions": positions}
 
 
@@ -203,7 +304,8 @@ class ViewProjectExecutor:
                 views = sw_result["views"]
                 for w in sw_result.get("warnings", []):
                     logger.warning(f"[Task:{ctx.task_id}] step3: {w}")
-                result: Dict[str, Any] = {"views": views, "layout": _build_layout(views)}
+                result: Dict[str, Any] = {"views": views,
+                                          "layout": _build_layout(views, ctx.task_id)}
                 if sw_result.get("warnings"):
                     result["warnings"] = sw_result["warnings"]
                 views_file = output_dir / "views.json"
@@ -278,4 +380,4 @@ class ViewProjectExecutor:
             )
 
         views = [project_mesh(mesh, name) for name in view_names]
-        return {"views": views, "layout": _build_layout(views)}
+        return {"views": views, "layout": _build_layout(views, ctx.task_id)}
