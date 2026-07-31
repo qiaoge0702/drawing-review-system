@@ -5,7 +5,7 @@
 
 import os
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pathlib import Path
 from functools import lru_cache
 from pydantic import Field, field_validator
@@ -25,7 +25,10 @@ class LoggingConfig(BaseSettings):
         default="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         description="日志格式"
     )
-    file_path: Optional[str] = Field(default=None, description="日志文件路径")
+    file_path: Optional[str] = Field(
+        default=str(PROJECT_ROOT / "logs" / "app.log"),
+        description="日志文件路径（设为空字符串则仅控制台输出）"
+    )
     max_bytes: int = Field(default=10 * 1024 * 1024, description="单个日志文件最大字节数")
     backup_count: int = Field(default=5, description="保留的备份文件数量")
     
@@ -89,6 +92,25 @@ class StorageConfig(BaseSettings):
     cleanup_temp_after_hours: int = Field(default=24, description="临时文件清理时间(小时)")
 
 
+class SWConfig(BaseSettings):
+    """SolidWorks API 配置（Step3 工程图视图投影引擎）"""
+    model_config = SettingsConfigDict(env_prefix="SW_")
+
+    drawing_template: str = Field(
+        default=r"C:\ProgramData\SolidWorks\SOLIDWORKS 2025\templates\gb_a3.drwdot",
+        description="工程图模板路径（国标 A3）"
+    )
+    predefined_view_names: Dict[str, str] = Field(
+        default={"front": "*前视", "top": "*上视", "left": "*左视"},
+        description="预定义视图名映射（中文版 SW 必须中文）"
+    )
+    view_insert_positions: Dict[str, List[float]] = Field(
+        default={"front": [0.15, 0.15], "top": [0.15, 0.08], "left": [0.28, 0.15]},
+        description="视图插入图纸坐标（米）"
+    )
+    spline_sample_points: int = Field(default=50, description="样条边离散采样点数")
+
+
 class Settings(BaseSettings):
     """
     应用主配置类
@@ -118,6 +140,7 @@ class Settings(BaseSettings):
     dxf: DXFConfig = Field(default_factory=DXFConfig)
     ai: AIConfig = Field(default_factory=AIConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    sw: SWConfig = Field(default_factory=SWConfig)
     
     @field_validator("port")
     @classmethod
@@ -134,6 +157,8 @@ class Settings(BaseSettings):
         
         if self.logging.file_path:
             from logging.handlers import RotatingFileHandler
+            # 确保日志目录存在
+            Path(self.logging.file_path).parent.mkdir(parents=True, exist_ok=True)
             file_handler = RotatingFileHandler(
                 self.logging.file_path,
                 maxBytes=self.logging.max_bytes,

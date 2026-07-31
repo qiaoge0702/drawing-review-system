@@ -17,7 +17,7 @@
 | AI模型 | Kimi K3 / GPT-4o（多模态） | — |
 | 后端 | FastAPI + Pydantic 2.0 + asyncio | FastAPI 0.140.7 / Python 3.12.10 |
 | 前端 | Vanilla JS + ES Module（M1-M2）；Vue3+TS+Vite（M3 起切换） | — |
-| SW 版本 | SolidWorks 2024 (33.3.0)，COM 可连接已实测 | 试用版 30 天 ⚠️ |
+| SW 版本 | SolidWorks 2025 正式版（COM 实测可连接） | — |
 
 ## 3. 目录拓扑
 
@@ -46,7 +46,7 @@ drawing-review-system/
 
 - **当前**: M1 框架搭建 ✅ 完成（2026-07-30），两大门禁达成（流水线可空跑 / API 契约冻结）
 - **下一步**: M2 核心生成（第4-6周）—— Step3 视图投影、Step7 DXF 构建真实执行器；目标 LB26 焊接件生成可打开、结构正确
-- **硬约束**: SW 试用到期前必须完成 M2 核心（同时备 STEP 解析备用路径）
+- **硬约束**: 无许可到期风险；STEP 解析备用路径为可选增强，不阻塞 M2
 
 ## 5. 禁区与约定
 
