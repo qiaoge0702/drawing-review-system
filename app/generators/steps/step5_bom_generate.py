@@ -10,8 +10,9 @@ M2 范围（规则驱动，非 AI）：
   * 图号：path 文件名去扩展名优先，回退 name
   * 名称：组件 name
   * 数量：聚合后总数
-  * 材料/单重：Step2 无单件数据 → 留空字符串（诚实原则，禁止编造）
-  * 总重：单重×数量（单重空则空）
+  * 材料/单重：Step2 bom 条目的 material/mass（真机 SW COM 提取，kg）；
+    聚合时取同图号首见非空值；取不到 → 空字符串（诚实原则，禁止编造）
+  * 总重：单重×数量，kg 保留 3 位小数（单重空则空）
   * 备注：name 含标准件前缀（GB/T、JB/T、HG/T、Q/ 等，见 _PURCHASED_PREFIXES）
     → "外购"（外购件识别）
 - 排序：装配件（非外购）在前、标准件（外购）在后，同级按图号字典序
@@ -195,9 +196,10 @@ def aggregate_bom(bom: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     - 排除 is_suppressed=True 组件
     - 按图号聚合，数量累加
     - 排序：装配件在前、外购件在后，同级按图号字典序
-    - 材料/单重：Step2 无单件数据 → 空字符串；单重空 → 总重空
+    - 材料/单重：取同图号首见非空值；单重空 → 总重空
 
-    Returns: 未加序号的行列表 [{"drawing_number", "name", "quantity", "remark"}, ...]
+    Returns: 未加序号的行列表 [{drawing_number, name, quantity, purchased,
+             material, mass}, ...]（mass 为 float kg 或 ""）
     """
     groups: Dict[str, Dict[str, Any]] = {}
     for item in bom:
@@ -219,17 +221,35 @@ def aggregate_bom(bom: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             qty = 1
 
         group = groups.get(drawing_number)
+        material = str(item.get("material") or "").strip()
+        mass = item.get("mass")
+        mass = float(mass) if isinstance(mass, (int, float)) and not isinstance(mass, bool) else ""
         if group is None:
             groups[drawing_number] = {
                 "drawing_number": drawing_number,
                 "name": name,
                 "quantity": qty,
                 "purchased": _is_purchased(name),
+                "material": material,
+                "mass": mass,
             }
         else:
             group["quantity"] += qty
             if _is_purchased(name):
                 group["purchased"] = True
+            # 同图号首见非空值优先；后续非空值与首个不一致 → 告警（取首个）
+            if not group["material"] and material:
+                group["material"] = material
+            elif group["material"] and material and material != group["material"]:
+                logger.warning(
+                    f"[step5] 同图号 {drawing_number} 材料不一致: "
+                    f"'{group['material']}' vs '{material}'，取首见非空值")
+            if group["mass"] == "" and mass != "":
+                group["mass"] = mass
+            elif group["mass"] != "" and mass != "" and mass != group["mass"]:
+                logger.warning(
+                    f"[step5] 同图号 {drawing_number} 单重不一致: "
+                    f"{group['mass']} vs {mass} kg，取首见非空值")
 
     rows = sorted(groups.values(),
                   key=lambda g: (g["purchased"], g["drawing_number"]))
@@ -263,12 +283,13 @@ class BomGenerateExecutor:
                 step=ctx.step,
             )
 
-        # 诚实原则：Step2 无单件材料/单重数据 → 空字符串；单重空 → 总重空
-        unit_weight: Any = ""
-        material: Any = ""
+        # 材料/单重：Step2 真机数据，缺失 → 空字符串（诚实原则）；总重 = 单重×数量
         rows: List[List[Any]] = []
         for idx, g in enumerate(aggregated, start=1):
-            total_weight = round(unit_weight * g["quantity"], 4) if unit_weight != "" else ""
+            material = g["material"]
+            unit_weight: Any = round(g["mass"], 3) if g["mass"] != "" else ""
+            total_weight: Any = (
+                round(unit_weight * g["quantity"], 3) if unit_weight != "" else "")
             remark = _PURCHASED_REMARK if g["purchased"] else ""
             rows.append([
                 idx,

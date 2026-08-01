@@ -22,13 +22,16 @@ from app.core.exceptions import SWException, ErrorCode
 COLUMNS = ["序号", "图号", "名称", "数量", "材料", "单重", "总重", "备注"]
 
 
-def _item(name, path="", quantity=1, is_suppressed=False, level=1):
+def _item(name, path="", quantity=1, is_suppressed=False, level=1,
+          material="", mass=""):
     return {
         "level": level,
         "name": name,
         "path": path,
         "quantity": quantity,
         "is_suppressed": is_suppressed,
+        "material": material,
+        "mass": mass,
     }
 
 
@@ -101,6 +104,46 @@ class TestAggregateBom:
         assert by_dn["LB26.11001"]["purchased"] is False
         # 排序：非外购件在前
         assert rows[0]["drawing_number"] == "LB26.11001"
+
+
+class TestAggregateMaterialMass:
+    def test_first_seen_material_mass_aggregated(self):
+        """同图号首见非空 material/mass 进入聚合结果"""
+        bom = [
+            _item("连接板", "C:/p/LB26.11001.SLDPRT", 1, material="Q355B", mass=12.3456),
+            _item("连接板", "C:/p/LB26.11001.SLDPRT", 2),  # 后续条目空 → 不覆盖首见
+        ]
+        rows = aggregate_bom(bom)
+        assert rows[0]["material"] == "Q355B"
+        assert rows[0]["mass"] == pytest.approx(12.3456)
+
+    def test_later_non_empty_fills_missing(self):
+        """首见为空时，后续条目非空值补齐"""
+        bom = [
+            _item("连接板", "C:/p/LB26.11001.SLDPRT", 1),
+            _item("连接板", "C:/p/LB26.11001.SLDPRT", 1, material="45#", mass=3.5),
+        ]
+        rows = aggregate_bom(bom)
+        assert rows[0]["material"] == "45#"
+        assert rows[0]["mass"] == pytest.approx(3.5)
+
+    def test_missing_stays_empty(self):
+        bom = [_item("连接板", "C:/p/LB26.11001.SLDPRT", 1)]
+        rows = aggregate_bom(bom)
+        assert rows[0]["material"] == "" and rows[0]["mass"] == ""
+
+    def test_conflicting_material_mass_warns_keeps_first(self, caplog):
+        """同图号材料/单重不一致 → logger.warning + 取首见非空值"""
+        bom = [
+            _item("连接板", "C:/p/LB26.11001.SLDPRT", 1, material="Q355B", mass=12.0),
+            _item("连接板", "C:/p/LB26.11001.SLDPRT", 1, material="45#", mass=9.5),
+        ]
+        with caplog.at_level("WARNING"):
+            rows = aggregate_bom(bom)
+        assert rows[0]["material"] == "Q355B"
+        assert rows[0]["mass"] == pytest.approx(12.0)
+        assert any("材料不一致" in r.message for r in caplog.records)
+        assert any("单重不一致" in r.message for r in caplog.records)
 
 
 class TestDrawingNumberExtraction:
@@ -240,6 +283,34 @@ class TestBomGenerateExecutor:
             parameters={"bom_config": {"position": {"height": 999}}})
         result = await BomGenerateExecutor()(ctx)
         assert result["bom_table"]["position"]["height"] == 20.0 + 5 * 15.0
+
+    @pytest.mark.asyncio
+    async def test_material_mass_columns_filled(self, tmp_path):
+        """有 material/mass 时三列填真实数据：单重 3 位小数，总重=单重×数量"""
+        bom = [
+            _item("底架焊合", "C:/p/LB26.11000.SLDASM", 1, material="Q355B", mass=85.2),
+            _item("连接板", "C:/p/LB26.11001.SLDPRT", 2, material="45#", mass=12.3456),
+            _item("螺栓 GB/T 5782", "C:/std/GBT5782.SLDPRT", 4, mass=0.05),
+        ]
+        ctx = _make_ctx(tmp_path, {"bom": bom, "bom_summary": {}})
+        result = await BomGenerateExecutor()(ctx)
+        rows = result["bom_table"]["rows"]
+        # 装配在前：11000 → 11001 → 外购
+        assert rows[0][4] == "Q355B" and rows[0][5] == 85.2 and rows[0][6] == 85.2
+        assert rows[1][4] == "45#"
+        assert rows[1][5] == 12.346  # 3 位小数
+        assert rows[1][6] == round(12.346 * 2, 3)
+        # 材料缺失 → 空；单重有 → 总重照算
+        assert rows[2][4] == "" and rows[2][5] == 0.05 and rows[2][6] == 0.2
+
+    @pytest.mark.asyncio
+    async def test_mass_missing_total_weight_empty(self, tmp_path):
+        """单重缺失 → 单重/总重均空（诚实原则）"""
+        bom = [_item("连接板", "C:/p/LB26.11001.SLDPRT", 3, material="Q355B")]
+        ctx = _make_ctx(tmp_path, {"bom": bom, "bom_summary": {}})
+        result = await BomGenerateExecutor()(ctx)
+        row = result["bom_table"]["rows"][0]
+        assert row[4] == "Q355B" and row[5] == "" and row[6] == ""
 
     @pytest.mark.asyncio
     async def test_missing_step2_raises(self, tmp_path):

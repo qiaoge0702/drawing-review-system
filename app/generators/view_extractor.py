@@ -55,23 +55,55 @@ def _pt2d(arr: Sequence[float], p3: Sequence[float]) -> Tuple[float, float]:
 
 
 def _curve_params3(edge: Any) -> Optional[Sequence[float]]:
-    """GetCurveParams3: [sx,sy,sz, ex,ey,ez, uStart,uEnd, ...]，取不到返回 None"""
+    """GetCurveParams3: [sx,sy,sz, ex,ey,ez, uStart,uEnd, ...]，取不到返回 None。
+    【2026-07-31 真机实测】SW2025 工程图视图边（Edge/SilhouetteEdge）上该接口
+    返回 CDispatch 或直接报错（本机恒不可用），调用链必须走 params2/evaluate 回退。"""
     try:
         cp = edge.GetCurveParams3
-        if cp and len(cp) >= 8:
+        if cp and not isinstance(cp, str) and len(cp) >= 8:
             return cp
     except Exception as e:
         logger.debug(f"GetCurveParams3 unavailable: {e}")
     return None
 
 
-def _endpoints_from_curve(edge: Any, curve: Any) -> Optional[Tuple[Sequence[float], Sequence[float]]]:
-    """边界的真实起终点（优先 GetCurveParams3，退化用 LineParams 前两段）"""
-    cp = _curve_params3(edge)
+def _curve_params2(edge: Any) -> Optional[Sequence[float]]:
+    """GetCurveParams2: 布局同 params3（真机实测 Edge(1) 边可用，SilhouetteEdge(4) 不可用）"""
+    try:
+        cp = edge.GetCurveParams2
+        if cp and not isinstance(cp, str) and len(cp) >= 8:
+            return cp
+    except Exception as e:
+        logger.debug(f"GetCurveParams2 unavailable: {e}")
+    return None
+
+
+def _endpoints_via_evaluate(curve: Any) -> Optional[Tuple[Sequence[float], Sequence[float]]]:
+    """curve.GetEndParams() 参数范围 + curve.Evaluate(u) 求端点（真机实测 SilhouetteEdge 可用）"""
+    try:
+        ep = curve.GetEndParams()
+        u0, u1 = float(ep[0]), float(ep[1])
+        if (not (math.isfinite(u0) and math.isfinite(u1)) or u1 <= u0
+                or u1 - u0 > 100.0):  # 无限线（真机 GetEndParams 返回 ±10000）→ 不可用
+            return None
+        p0 = curve.Evaluate(u0)
+        p1 = curve.Evaluate(u1)
+        return p0[0:3], p1[0:3]
+    except Exception as e:
+        logger.debug(f"GetEndParams/Evaluate endpoints unavailable: {e}")
+        return None
+
+
+def _edge_endpoints(edge: Any, curve: Any) -> Optional[Tuple[Sequence[float], Sequence[float]]]:
+    """边真实起终点：params3 → params2 → GetEndParams+Evaluate → LineParams（root/dir 兜底）"""
+    cp = _curve_params3(edge) or _curve_params2(edge)
     if cp is not None:
         return cp[0:3], cp[3:6]
+    ep = _endpoints_via_evaluate(curve)
+    if ep is not None:
+        return ep
     try:
-        lp = curve.LineParams  # [root x,y,z, dir x,y,z]（probe_step8 用法）
+        lp = curve.LineParams  # [root x,y,z, dir x,y,z]（probe_step8 用法；兜底，非真实端点）
         if lp and len(lp) >= 6:
             return lp[0:3], lp[3:6]
     except Exception:
@@ -79,13 +111,25 @@ def _endpoints_from_curve(edge: Any, curve: Any) -> Optional[Tuple[Sequence[floa
     return None
 
 
+def _endpoints_from_curve(edge: Any, curve: Any) -> Optional[Tuple[Sequence[float], Sequence[float]]]:
+    """边界的真实起终点（params3 → params2 → evaluate → LineParams 兜底）"""
+    return _edge_endpoints(edge, curve)
+
+
 def _sample_spline(edge: Any, curve: Any, arr: Sequence[float],
                    samples: int) -> Optional[List[Tuple[float, float]]]:
-    """样条/交线边：按参数范围均匀采样 → 2D 折线点列"""
-    cp = _curve_params3(edge)
-    if cp is None:
-        return None
-    u0, u1 = float(cp[6]), float(cp[7])
+    """样条/交线边：按参数范围均匀采样 → 2D 折线点列（params3 → params2 → GetEndParams）"""
+    cp = _curve_params3(edge) or _curve_params2(edge)
+    if cp is not None:
+        u0, u1 = float(cp[6]), float(cp[7])
+    else:
+        try:
+            ep = curve.GetEndParams()
+            u0, u1 = float(ep[0]), float(ep[1])
+        except Exception:
+            return None
+        if u1 - u0 > 100.0:  # 无限线（真机 ±10000）→ 不可采样
+            return None
     if not math.isfinite(u0) or not math.isfinite(u1) or u1 <= u0:
         return None
     pts = []
@@ -98,6 +142,47 @@ def _sample_spline(edge: Any, curve: Any, arr: Sequence[float],
         logger.debug(f"Spline sampling failed: {e}")
         return None
     return pts
+
+
+def edge_param_key(edge: Any, digits: int = 6) -> Optional[Tuple[float, ...]]:
+    """
+    边身份哈希（差集法隐藏线匹配用；与实体参数化共用同一参数来源链）：
+      - 曲线类型码 cid（3001 LINE / 3002 CIRCLE / ...）
+      - 起终点（params3 → params2 → GetEndParams+Evaluate 链，米，round 到 digits 位）
+      - 圆/弧（CIRCLE=3002）附加圆心 + 半径（避免同端点不同圆误判同边）
+      - 线（LINE=3001）端点取不到时附加 LineParams root+dir（区分不同直线）
+    【2026-07-31 真机实测】本机 SW2025 视图边 GetCurveParams3 恒不可用
+    （返回 CDispatch），SilhouetteEdge 仅 LineParams + Evaluate 可用；
+    同一曲线在线框/HLR 两模式下参数一致，可跨模式匹配。
+    完全取不到参数 → None（调用方按不可匹配处理，禁止强行造 key）。
+    """
+    try:
+        curve = edge.GetCurve
+        cid = curve.Identity
+    except Exception:
+        return None
+
+    parts: List[float] = [float(cid)]
+    ep = _edge_endpoints(edge, curve)
+    got_params = ep is not None
+    if ep is not None:
+        parts.extend(float(v) for v in ep[0])
+        parts.extend(float(v) for v in ep[1])
+    try:
+        if cid == CIRCLE:
+            cpr = curve.CircleParams  # [cx,cy,cz, ax,ay,az, radius]
+            parts.extend(float(cpr[i]) for i in (0, 1, 2, 3, 4, 5, 6))
+            got_params = True
+        elif cid == LINE and ep is None:
+            lp = curve.LineParams  # [root, dir]：无端点时的区分依据
+            if lp and len(lp) >= 6:
+                parts.extend(float(v) for v in lp[0:6])
+                got_params = True
+    except Exception:
+        pass
+    if not got_params:
+        return None
+    return tuple(round(v, digits) for v in parts)
 
 
 def edge_to_entities(edge: Any, arr: Sequence[float],
@@ -120,8 +205,15 @@ def edge_to_entities(edge: Any, arr: Sequence[float],
         ep = _endpoints_from_curve(edge, curve)
         if ep is None:
             return [], f"{tname}: no endpoints"
+        # 诚实标注：端点来自 LineParams root/dir 兑底（非真实段端点）时如实上报。
+        # 真机实测（2026-07-31）：SilhouetteEdge 在本机无端点参数可取
+        # （params3/params2 不可用，GetEndParams 返回 ±10000 无限线），
+        # 只能用 LineParams 近似，几何范围不准确。
+        approx = (_curve_params3(edge) is None and _curve_params2(edge) is None
+                  and _endpoints_via_evaluate(curve) is None)
         (x1, y1), (x2, y2) = _pt2d(arr, ep[0]), _pt2d(arr, ep[1])
-        return [{"type": "line", "x1": x1, "y1": y1, "x2": x2, "y2": y2}], None
+        note = f"{tname}: endpoints approximated from LineParams(root/dir)" if approx else None
+        return [{"type": "line", "x1": x1, "y1": y1, "x2": x2, "y2": y2}], note
 
     if cid == CIRCLE:
         try:

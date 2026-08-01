@@ -5,7 +5,9 @@ Fake 对象模拟侦察报告验证过的 COM 鸭子类型：
 - curve.Identity / IsCircle 为属性（非方法）
 - edge.GetCurve / edge.GetCurveParams3 为属性
 - curve.Evaluate(u) 为方法（样条采样）
-- view.GetVisibleEntities2(comp, type_code) 为方法
+- view.GetVisibleEntities2(comp, type_code) 为方法（仅类型码 1=Edge；隐藏线由
+  显示模式差集提取：线框(1)全集 − HLR(2)可见集）
+- view.SetDisplayMode4 / GetDisplayMode3 驱动显示模式切换
 - ModelToViewTransform.ArrayData 为 16 维矩阵（索引 12 为缩放）
 """
 
@@ -84,11 +86,15 @@ class FakeXform:
 
 
 class FakeView:
-    def __init__(self, edges_by_code, arr=FRONT_ARR, scale=1.0, display_mode_ok=False):
-        self._edges_by_code = edges_by_code  # {type_code: [edges]}
+    def __init__(self, edges_by_mode, arr=FRONT_ARR, scale=1.0, initial_mode=2,
+                 set_display_ok=True):
+        # edges_by_mode: {display_mode: [edges]} 或 {(id(comp), display_mode): [edges]}
+        # display_mode: 1=线框（Edge 全集，含隐藏边），2=HLR（仅可见边）
+        self._edges_by_mode = edges_by_mode
         self._arr = arr
         self.ScaleDecimal = scale
-        self._display_mode_ok = display_mode_ok
+        self._mode = initial_mode
+        self._set_ok = set_display_ok
         self.display_mode_calls = 0
 
     @property
@@ -99,17 +105,27 @@ class FakeView:
         self._comps = comps
 
     def GetVisibleEntities2(self, comp, code):
-        return self._edges_by_code.get((id(comp), code),
-                                       self._edges_by_code.get(code, []))
+        if code != 1:  # 只读 Edge（swViewEntityType_e: Edge=1）
+            return []
+        return self._edges_by_mode.get((id(comp), self._mode),
+                                       self._edges_by_mode.get(self._mode, []))
 
     @property
     def ModelToViewTransform(self):
         return FakeXform(self._arr)
 
-    def SetDisplayMode3(self, *args):
+    def GetDisplayMode3(self, use_parent):
+        return self._mode
+
+    def SetDisplayMode4(self, use_parent, mode, facetted, edges):
         self.display_mode_calls += 1
-        if not self._display_mode_ok:
-            raise RuntimeError("SetDisplayMode3 not supported")
+        if not self._set_ok:
+            raise RuntimeError("SetDisplayMode4 not supported")
+        self._mode = mode
+        return True
+
+    def SetDisplayMode3(self, *args):
+        return self.SetDisplayMode4(*args)
 
 
 class FakeDrawing:
@@ -296,10 +312,10 @@ class TestBoundingBox:
 
 # ---------- 工程图提取全流程（Fake SW App） ----------
 
-def _build_fake_app(edges_by_code, views_n=1, display_mode_ok=False):
+def _build_fake_app(edges_by_mode, views_n=1, set_display_ok=True):
     views = []
     for _ in range(views_n):
-        v = FakeView(edges_by_code, display_mode_ok=display_mode_ok)
+        v = FakeView(edges_by_mode, set_display_ok=set_display_ok)
         v.set_components(["comp0"])
         views.append(v)
     drw = FakeDrawing(views)
@@ -310,7 +326,9 @@ class TestExtractViewsSync:
     def test_contract_view_structure(self, tmp_path):
         edges = [_line_edge((0, 0, 0), (0.1, 0, 0.05)),
                  _circle_edge((0.05, 0, 0.025), 0.005)]
-        app, drw, views = _build_fake_app({1: edges, 2: [_line_edge((0, 0, 0), (0.01, 0, 0))]})
+        hidden = _line_edge((0, 0, 0.01), (0.1, 0, 0.01))
+        # 线框(1)=可见+隐藏全集；HLR(2)=仅可见边 → 差集 1 条隐藏线
+        app, drw, views = _build_fake_app({1: edges + [hidden], 2: edges})
         result = extract_views_sync(str(tmp_path / "p.sldprt"), ["front"], sw_app=app)
 
         view = result["views"][0]
@@ -318,21 +336,30 @@ class TestExtractViewsSync:
         assert view["display_name"] == "主视图"
         assert view["projection"] == "first_angle"
         assert {e["type"] for e in view["entities"]} == {"line", "circle"}
-        assert view["hidden_lines"], "type码2 取到隐藏线，应填入"
+        assert len(view["hidden_lines"]) == 1, "线框−HLR 差集应得 1 条隐藏线"
+        assert view["hidden_lines"][0]["type"] == "line"
+        # 成功提取后不得再写"取不到"类 warning
+        assert not any("hidden_lines 取不到" in w or "hidden_lines 提取失败" in w
+                       for w in result["warnings"])
         assert set(view["bounding_box"]) == {"min_x", "min_y", "max_x", "max_y"}
         assert view["scale"] == "1:1"
         # 中文版预定义视图名
         assert views[0].inserted_view_name == "*前视"
         assert drw.rebuilt >= 1
+        # 显示模式被切换且恢复到初始模式（HLR=2）
+        assert views[0].display_mode_calls >= 2
+        assert views[0].GetDisplayMode3(True) == 2
         assert app.closed is False  # 注入 app 时由调用方负责关闭
 
     def test_assembly_multi_component(self, tmp_path):
         comp_a, comp_b = "compA", "compB"
-        edges_by_code = {
+        edges_by_mode = {
             (id(comp_a), 1): [_line_edge((0, 0, 0), (0.1, 0, 0))],
+            (id(comp_a), 2): [_line_edge((0, 0, 0), (0.1, 0, 0))],
             (id(comp_b), 1): [_circle_edge((0, 0, 0), 0.01)],
+            (id(comp_b), 2): [_circle_edge((0, 0, 0), 0.01)],
         }
-        app, _, _ = _build_fake_app(edges_by_code)
+        app, _, _ = _build_fake_app(edges_by_mode)
         # 替换为多组件
         drw = app._drawing
         drw._views[0].set_components([comp_a, comp_b])
@@ -341,13 +368,13 @@ class TestExtractViewsSync:
         assert types == ["circle", "line"]
 
     def test_hidden_lines_unavailable_reported_not_silent(self, tmp_path):
-        """隐藏线取不到：hidden_lines 为空 + warnings 如实记录，禁止静默降级"""
+        """显示模式切换不可用 → 隐藏线提取失败：hidden_lines 为空 + warnings 如实记录"""
         edges = [_line_edge((0, 0, 0), (0.1, 0, 0))]
-        app, _, views = _build_fake_app({1: edges}, display_mode_ok=False)
+        app, _, views = _build_fake_app({1: edges, 2: edges}, set_display_ok=False)
         result = extract_views_sync(str(tmp_path / "p.sldprt"), ["front"], sw_app=app)
 
         assert result["views"][0]["hidden_lines"] == []
-        assert any("hidden_lines 取不到" in w for w in result["warnings"])
+        assert any("hidden_lines 提取失败" in w for w in result["warnings"])
         assert views[0].display_mode_calls >= 1  # 确实尝试过显示模式切换
 
     def test_view_insert_failure_raises(self, tmp_path):
@@ -358,7 +385,7 @@ class TestExtractViewsSync:
         assert exc_info.value.error_code == ErrorCode.GEN_STEP_FAILED
 
     def test_no_entities_raises(self, tmp_path):
-        app, _, _ = _build_fake_app({1: []})
+        app, _, _ = _build_fake_app({1: [], 2: []})
         with pytest.raises(SWException) as exc_info:
             extract_views_sync(str(tmp_path / "p.sldprt"), ["front"], sw_app=app)
         assert exc_info.value.error_code == ErrorCode.GEN_STEP_FAILED
@@ -371,7 +398,8 @@ class TestExecutorSWPath:
     async def test_sw_api_end_to_end(self, tmp_path, monkeypatch):
         edges = [_line_edge((0, 0, 0), (0.1, 0, 0.05)),
                  _circle_edge((0.05, 0, 0.025), 0.005)]
-        app, _, _ = _build_fake_app({1: edges, 0: [_line_edge((0, 0, 0), (0.02, 0, 0))]})
+        hidden = _line_edge((0, 0, 0.02), (0.05, 0, 0.02))
+        app, _, _ = _build_fake_app({1: edges + [hidden], 2: edges})
         monkeypatch.setattr(step3_view_project, "run_sw", _run_direct(app))
 
         src = tmp_path / "part.sldprt"
@@ -383,7 +411,7 @@ class TestExecutorSWPath:
         view = result["views"][0]
         assert view["name"] == "front"
         assert any(e["type"] == "circle" for e in view["entities"])
-        assert view["hidden_lines"], "type码0 取到隐藏线"
+        assert len(view["hidden_lines"]) == 1, "线框−HLR 差集应得 1 条隐藏线"
         assert set(result["layout"]["view_positions"]) == {"front"}
         # 落盘一致
         on_disk = json.loads((tmp_path / "output" / "views.json").read_text(encoding="utf-8"))
@@ -428,9 +456,9 @@ class TestExecutorSWPath:
 
     @pytest.mark.asyncio
     async def test_hidden_lines_warning_in_executor_result(self, tmp_path, monkeypatch):
-        """执行器结果如实携带隐藏线取不到的 warning"""
+        """执行器结果如实携带隐藏线提取失败的 warning"""
         edges = [_line_edge((0, 0, 0), (0.1, 0, 0))]
-        app, _, _ = _build_fake_app({1: edges})
+        app, _, _ = _build_fake_app({1: edges, 2: edges}, set_display_ok=False)
         monkeypatch.setattr(step3_view_project, "run_sw", _run_direct(app))
 
         src = tmp_path / "part.sldprt"
@@ -439,4 +467,4 @@ class TestExecutorSWPath:
 
         result = await ViewProjectExecutor()(ctx)
         assert result["views"][0]["hidden_lines"] == []
-        assert any("hidden_lines 取不到" in w for w in result.get("warnings", []))
+        assert any("hidden_lines 提取失败" in w for w in result.get("warnings", []))
