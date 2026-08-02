@@ -2,7 +2,11 @@
 Step 4 尺寸标注执行器单元测试
 
 不依赖 SW 环境：直接构造 views 数据（line/circle/arc 组合）驱动执行器，
-验证标注提取、位置、公差、重叠检测、异常路径与产物落盘。
+验证标注提取、位置、公差、保守放置冲突检测、待人工清单与产物落盘。
+
+保守放置语义（2026-08-01）：候选标注按尺寸值从大到小尝试放置，
+与已放标注重叠 / 文字碰视图实体包围盒 / 超出视图标注区域或图幅有效区
+→ 放弃并进 pending_manual；已放置标注保证互不重叠。
 """
 
 import json
@@ -15,6 +19,7 @@ from app.generators.steps.step4_dimension import (
     DimensionExecutor,
     extract_view_dimensions,
     detect_overlaps,
+    place_dimensions,
 )
 from app.models.generation import StepName
 from app.core.exceptions import SWException, ErrorCode
@@ -40,6 +45,17 @@ def _box_view(name: str = "front", min_x=0.0, min_y=0.0, max_x=100.0, max_y=50.0
     }
 
 
+def _layout(*entries, sheet_size="A3"):
+    """构造 Step3 layout：entries = (view_name, x, y, width, height)"""
+    return {
+        "sheet_size": sheet_size,
+        "view_positions": {
+            name: {"x": x, "y": y, "width": w, "height": h}
+            for name, x, y, w, h in entries
+        },
+    }
+
+
 def _make_ctx(tmp_path: Path, views_result=None, parameters=None) -> StepContext:
     previous = {}
     if views_result is not None:
@@ -57,7 +73,7 @@ def _make_ctx(tmp_path: Path, views_result=None, parameters=None) -> StepContext
 class TestDimensionExecutor:
     @pytest.mark.asyncio
     async def test_linear_diameter_radius_extraction(self, tmp_path):
-        """line 外廓 → linear；circle → diameter(⌀)；arc → radius(R)"""
+        """line 外廓 → linear 放置；圆/弧标注文字落在视图实体包围盒内 → 保守放弃进待人工"""
         view = _box_view(extra_entities=[
             {"type": "circle", "cx": 50.0, "cy": 25.0, "r": 10.0},
             {"type": "arc", "cx": 20.0, "cy": 20.0, "r": 5.0,
@@ -70,25 +86,26 @@ class TestDimensionExecutor:
         for d in result["dimensions"]:
             by_type.setdefault(d["type"], []).append(d)
 
-        # 外廓 linear 标注 2 条（宽 + 高）
+        # 外廓 linear 标注 2 条（宽 + 高）正常放置
         linear = by_type["linear"]
         assert len(linear) == 2
         width_dim = next(d for d in linear if d["value"] == pytest.approx(100.0))
         height_dim = next(d for d in linear if d["value"] == pytest.approx(50.0))
 
-        # 直径标注
-        dia = by_type["diameter"]
-        assert len(dia) == 1
-        assert dia[0]["value"] == pytest.approx(20.0)
-        assert dia[0]["prefix"] == "⌀"
+        # 直径/半径标注文字在 bbox 内 → 未自动放置，进待人工清单（字段契约保留）
+        assert "diameter" not in by_type
+        assert "radius" not in by_type
+        pending = {e["id"]: e for e in result["pending_manual"]}
+        assert result["pending_count"] == 2
+        dia = next(e for e in pending.values() if e["type"] == "diameter")
+        assert dia["value"] == pytest.approx(20.0)
+        assert dia["prefix"] == "⌀"
+        assert dia["suggested_direction"] == "角度"
+        rad = next(e for e in pending.values() if e["type"] == "radius")
+        assert rad["value"] == pytest.approx(5.0)
+        assert rad["prefix"] == "R"
 
-        # 半径标注
-        rad = by_type["radius"]
-        assert len(rad) == 1
-        assert rad[0]["value"] == pytest.approx(5.0)
-        assert rad[0]["prefix"] == "R"
-
-        # 契约公共字段
+        # 契约公共字段（已放置标注）
         for d in result["dimensions"]:
             assert d["unit"] == "mm"
             assert d["is_automatic"] is True
@@ -97,6 +114,10 @@ class TestDimensionExecutor:
             assert d["associated_entities"]
             assert d["view_name"] == "front"  # 所属视图名（Step7 定位用）
             assert set(d["position"]) == {"x1", "y1", "x2", "y2", "text_x", "text_y"}
+
+        # 统计字段
+        assert result["placed_count"] == len(result["dimensions"])
+        assert result["pending_count"] == len(result["pending_manual"])
 
     @pytest.mark.asyncio
     async def test_bbox_outline_position_and_value(self, tmp_path):
@@ -172,22 +193,6 @@ class TestDimensionExecutor:
         assert exc_info.value.error_code == ErrorCode.GEN_STEP_FAILED
 
     @pytest.mark.asyncio
-    async def test_overlap_detection_and_score(self, tmp_path):
-        """圆心位于 bbox 下边中点的圆，其直径标注线与宽度标注线共线且区间相交 → 重叠"""
-        view = _box_view(min_x=0.0, min_y=0.0, max_x=100.0, max_y=50.0,
-                         extra_entities=[{"type": "circle", "cx": 50.0, "cy": -10.0, "r": 30.0}])
-        # 宽度标注线 y = -10，区间 [0,100]；直径标注线 y = -10，区间 [20,80] → 重叠
-        ctx = _make_ctx(tmp_path, {"views": [view]})
-        result = await DimensionExecutor()(ctx)
-
-        assert len(result["overlaps"]) == 1
-        ov = result["overlaps"][0]
-        assert ov["severity"] == "warning"
-        assert len(ov["dim_ids"]) == 2
-        total = len(result["dimensions"])
-        assert result["placement_score"] == pytest.approx(1.0 - 1 / total, abs=1e-3)
-
-    @pytest.mark.asyncio
     async def test_no_overlap_full_score(self, tmp_path):
         view = _box_view(extra_entities=[{"type": "circle", "cx": 50.0, "cy": 25.0, "r": 5.0}])
         ctx = _make_ctx(tmp_path, {"views": [view]})
@@ -196,34 +201,15 @@ class TestDimensionExecutor:
         assert result["placement_score"] == 1.0
 
     @pytest.mark.asyncio
-    async def test_placement_score_clamped_to_zero(self, tmp_path):
-        """大量重叠（重叠对数 > 标注数）→ placement_score clamp 到 0.0，不出现负分。
-        完整避让布局属 M4 AI 范围，M2 只做检测与评分。"""
-        # 4 个圆的直径标注线均与宽度标注线共线（y=-10）且区间相交：
-        # dims=6（2 外廓 + 4 直径），overlaps ≥ C(4,2)+4 = 10 > 6 → 未 clamp 会为负
-        circles = [
-            {"type": "circle", "cx": 40.0, "cy": -10.0, "r": 20.0},
-            {"type": "circle", "cx": 50.0, "cy": -10.0, "r": 20.0},
-            {"type": "circle", "cx": 60.0, "cy": -10.0, "r": 20.0},
-            {"type": "circle", "cx": 70.0, "cy": -10.0, "r": 20.0},
-        ]
-        view = _box_view(min_x=0.0, min_y=0.0, max_x=100.0, max_y=50.0,
-                         extra_entities=circles)
-        ctx = _make_ctx(tmp_path, {"views": [view]})
-        result = await DimensionExecutor()(ctx)
-
-        assert len(result["overlaps"]) > len(result["dimensions"])
-        assert result["placement_score"] == 0.0
-
-    @pytest.mark.asyncio
     async def test_multi_view_view_name_populated(self, tmp_path):
-        """多视图：每条标注 view_name 指向所属视图"""
+        """多视图：每条标注 view_name 指向所属视图（布局分开，互不冲突）"""
         views = [_box_view("front"), _box_view("top", max_x=100.0, max_y=30.0)]
-        ctx = _make_ctx(tmp_path, {"views": views})
+        layout = _layout(("front", 150.0, 150.0, 100.0, 50.0),
+                         ("top", 150.0, 50.0, 100.0, 30.0))
+        ctx = _make_ctx(tmp_path, {"views": views, "layout": layout})
         result = await DimensionExecutor()(ctx)
         names = [d["view_name"] for d in result["dimensions"]]
-        assert names[:2] == ["front", "front"]
-        assert names[2:] == ["top", "top"]
+        assert sorted(names) == ["front", "front", "top", "top"]
 
     @pytest.mark.asyncio
     async def test_dimensions_json_artifact(self, tmp_path):
@@ -238,6 +224,9 @@ class TestDimensionExecutor:
         # 中文/符号字符不转义（ensure_ascii=False）
         raw = dims_file.read_text(encoding="utf-8")
         assert "\\u" not in raw
+        # 顶层契约键：原有键保留 + 新增 pending_manual / 统计
+        assert {"dimensions", "placement_score", "overlaps",
+                "placed_count", "pending_count", "pending_manual"} <= set(on_disk)
 
     @pytest.mark.asyncio
     async def test_load_views_from_checkpoint_file(self, tmp_path):
@@ -255,11 +244,138 @@ class TestDimensionExecutor:
     @pytest.mark.asyncio
     async def test_multi_view_ids_unique(self, tmp_path):
         views = [_box_view("front"), _box_view("top", max_x=100.0, max_y=30.0)]
-        ctx = _make_ctx(tmp_path, {"views": views})
+        layout = _layout(("front", 150.0, 150.0, 100.0, 50.0),
+                         ("top", 150.0, 50.0, 100.0, 30.0))
+        ctx = _make_ctx(tmp_path, {"views": views, "layout": layout})
         result = await DimensionExecutor()(ctx)
         ids = [d["id"] for d in result["dimensions"]]
         assert len(ids) == len(set(ids))
         assert len(result["dimensions"]) == 4  # 每视图 2 条外廓标注
+
+
+class TestConservativePlacement:
+    """保守放置冲突检测：重叠放弃 / 图幅外放弃 / 正常放置保留"""
+
+    @pytest.mark.asyncio
+    async def test_overlap_dim_dropped_to_pending(self, tmp_path):
+        """直径标注线与已放置的宽度标注线共线相交 → 放弃，overlaps 恒为空"""
+        view = _box_view(min_x=0.0, min_y=0.0, max_x=100.0, max_y=50.0,
+                         extra_entities=[{"type": "circle", "cx": 50.0, "cy": -10.0, "r": 30.0}])
+        # 宽度标注线 y=-10 [0,100]；直径标注线 y=-10 [20,80] → 重叠 → 直径标注放弃
+        layout = _layout(("front", 150.0, 150.0, 100.0, 50.0))
+        ctx = _make_ctx(tmp_path, {"views": [view], "layout": layout})
+        result = await DimensionExecutor()(ctx)
+
+        assert result["overlaps"] == []  # 已放置标注互不重叠
+        assert result["placement_score"] == 1.0
+        assert {d["type"] for d in result["dimensions"]} == {"linear"}
+        assert result["placed_count"] == 2
+        assert result["pending_count"] == 1
+        entry = result["pending_manual"][0]
+        assert entry["type"] == "diameter"
+        assert entry["view_name"] == "front"
+        assert set(entry) >= {"id", "type", "value", "unit", "tolerance",
+                              "view_name", "suggested_direction"}
+
+    @pytest.mark.asyncio
+    async def test_mass_overlap_all_conflicting_dropped(self, tmp_path):
+        """大量候选互相冲突 → 全部保守放弃，已放置部分零重叠，不出现负分"""
+        circles = [
+            {"type": "circle", "cx": 40.0, "cy": -10.0, "r": 20.0},
+            {"type": "circle", "cx": 50.0, "cy": -10.0, "r": 20.0},
+            {"type": "circle", "cx": 60.0, "cy": -10.0, "r": 20.0},
+            {"type": "circle", "cx": 70.0, "cy": -10.0, "r": 20.0},
+        ]
+        view = _box_view(min_x=0.0, min_y=0.0, max_x=100.0, max_y=50.0,
+                         extra_entities=circles)
+        layout = _layout(("front", 150.0, 150.0, 100.0, 50.0))
+        ctx = _make_ctx(tmp_path, {"views": [view], "layout": layout})
+        result = await DimensionExecutor()(ctx)
+
+        assert result["overlaps"] == []
+        assert result["placement_score"] == 1.0
+        assert result["placed_count"] == 2  # 仅两条外廓标注
+        assert result["pending_count"] == 4
+
+    @pytest.mark.asyncio
+    async def test_off_sheet_dim_dropped(self, tmp_path):
+        """标注整体超出图幅有效区 → 放弃进待人工"""
+        view = _box_view()  # 100x50，宽度标注线在 y=-10
+        # 视图放在图幅下边缘（y=12）：宽度标注图纸 y=12-10=2 < 有效区边界 10 → 放弃
+        layout = _layout(("front", 150.0, 12.0, 100.0, 50.0), sheet_size="A3")
+        ctx = _make_ctx(tmp_path, {"views": [view], "layout": layout})
+        result = await DimensionExecutor()(ctx)
+
+        values = {d["value"] for d in result["dimensions"]}
+        assert 100.0 not in values  # 宽度标注被放弃
+        assert 50.0 in values       # 高度标注在图幅内 → 保留
+        assert result["pending_count"] == 1
+        assert result["pending_manual"][0]["suggested_direction"] == "水平"
+
+    @pytest.mark.asyncio
+    async def test_outside_view_region_dropped(self, tmp_path):
+        """标注超出所属视图标注区域（视图区外扩 25mm）→ 放弃"""
+        # 圆远离 bbox 右下角：直径标注文字远超视图区域
+        view = _box_view(min_x=0.0, min_y=0.0, max_x=100.0, max_y=50.0,
+                         extra_entities=[{"type": "circle", "cx": 200.0, "cy": 200.0, "r": 10.0}])
+        layout = _layout(("front", 150.0, 150.0, 100.0, 50.0))
+        ctx = _make_ctx(tmp_path, {"views": [view], "layout": layout})
+        result = await DimensionExecutor()(ctx)
+
+        assert result["pending_count"] == 1
+        assert result["pending_manual"][0]["type"] == "diameter"
+
+    @pytest.mark.asyncio
+    async def test_normal_placement_retained(self, tmp_path):
+        """无冲突的外廓标注正常放置：坐标为视图局部坐标，统计正确"""
+        view = _box_view()
+        layout = _layout(("front", 150.0, 150.0, 100.0, 50.0))
+        ctx = _make_ctx(tmp_path, {"views": [view], "layout": layout})
+        result = await DimensionExecutor()(ctx)
+
+        assert result["placed_count"] == 2
+        assert result["pending_count"] == 0
+        assert result["pending_manual"] == []
+        assert result["overlaps"] == []
+        # 坐标仍是视图局部坐标（未乘比例/未加图幅偏移）
+        width_dim = next(d for d in result["dimensions"] if d["value"] == pytest.approx(100.0))
+        assert width_dim["position"]["y1"] == pytest.approx(-10.0)
+
+    @pytest.mark.asyncio
+    async def test_pending_manual_txt_written(self, tmp_path):
+        """待人工清单同时输出人类可读 txt（表格化）"""
+        view = _box_view(extra_entities=[{"type": "circle", "cx": 50.0, "cy": 25.0, "r": 10.0}])
+        layout = _layout(("front", 150.0, 150.0, 100.0, 50.0))
+        ctx = _make_ctx(tmp_path, {"views": [view], "layout": layout})
+        result = await DimensionExecutor()(ctx)
+        assert result["pending_count"] == 1
+
+        txt_file = tmp_path / "output" / "pending_manual.txt"
+        assert txt_file.exists()
+        content = txt_file.read_text(encoding="utf-8")
+        assert "待人工标注清单" in content
+        assert "共 1 条" in content
+        entry = result["pending_manual"][0]
+        assert entry["id"] in content
+        assert "front" in content
+        assert "diameter" in content
+        assert "角度" in content
+
+    def test_place_dimensions_large_value_first(self):
+        """放置顺序：大尺寸优先占位，后到的冲突小尺寸被放弃"""
+        big = {"id": "dim_big", "type": "linear", "value": 100.0, "unit": "mm",
+               "tolerance": {}, "view_name": "front",
+               "position": {"x1": 0, "y1": -10, "x2": 100, "y2": -10,
+                            "text_x": 50, "text_y": -10}}
+        small = {"id": "dim_small", "type": "linear", "value": 40.0, "unit": "mm",
+                 "tolerance": {}, "view_name": "front",
+                 "position": {"x1": 30, "y1": -10, "x2": 70, "y2": -10,
+                              "text_x": 50, "text_y": -10}}
+        view_rects = {"front": (150.0, 150.0, 250.0, 200.0)}
+        transforms = {"front": ((150.0, 150.0), 1.0)}
+        placed, pending = place_dimensions([small, big], view_rects, transforms, None)
+        assert [d["id"] for d in placed] == ["dim_big"]
+        assert [d["id"] for d in pending] == ["dim_small"]
 
 
 class TestPureFunctions:

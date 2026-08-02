@@ -74,9 +74,12 @@ _LAYER_BOM = "BOM"
 _LAYER_TECH = "技术要求"
 _LAYER_FRAME = "图框"
 
-# A3 横向（mm）
-_SHEET_W = 420.0
-_SHEET_H = 297.0
+# 图幅尺寸（mm，横向）；默认 A3，实际取 Step3 layout.sheet_size
+_SHEET_SIZES = {
+    "A3": (420.0, 297.0), "A2": (594.0, 420.0),
+    "A1": (841.0, 594.0), "A0": (1189.0, 841.0),
+}
+_DEFAULT_SHEET = "A3"
 _FRAME_MARGIN = 10.0
 # 标题栏：右下角，宽×高（mm）
 _TITLE_W = 180.0
@@ -148,6 +151,15 @@ def _parse_scale(scale: Any) -> float:
     return 1.0
 
 
+def _sheet_of(views_data: Optional[Dict[str, Any]]) -> Tuple[str, float, float]:
+    """图幅尺寸：取 Step3 layout.sheet_size（A3→A0 选型），缺省/未知 → A3"""
+    name = ((views_data or {}).get("layout") or {}).get("sheet_size")
+    if name not in _SHEET_SIZES:
+        name = _DEFAULT_SHEET
+    w, h = _SHEET_SIZES[name]
+    return name, w, h
+
+
 def _translate(point: Tuple[float, float], view_pos: Dict[str, Any],
                scale: float) -> Tuple[float, float]:
     """
@@ -198,7 +210,8 @@ class DxfBuildExecutor:
         msp = doc.modelspace()
 
         # ---- 1. 图框 + 标题栏（图框层）----
-        self._draw_frame(msp, geometry, counts)
+        sheet_name, sheet_w, sheet_h = _sheet_of(views_data)
+        self._draw_frame(msp, geometry, views_data, sheet_w, sheet_h, counts)
 
         # ---- 2. 视图落图（轮廓线/隐藏线/中心线层）----
         layout_positions = (views_data.get("layout") or {}).get("view_positions") or {}
@@ -248,7 +261,7 @@ class DxfBuildExecutor:
             "dxf_structure": {
                 "header": {
                     "dxfversion": doc.dxfversion,
-                    "sheet_size": "A3",
+                    "sheet_size": sheet_name,
                     "orientation": "landscape",
                     "units": "mm",
                 },
@@ -281,16 +294,18 @@ class DxfBuildExecutor:
         counts["line"] = counts.get("line", 0) + 1
 
     def _draw_frame(self, msp, geometry: Optional[Dict[str, Any]],
+                    views_data: Optional[Dict[str, Any]],
+                    sheet_w: float, sheet_h: float,
                     counts: Dict[str, int]) -> None:
-        """A3 横向图框 + 右下角标题栏（简单矩形+文字，不做 block 定义）"""
+        """图框 + 右下角标题栏（简单矩形+文字，不做 block 定义）"""
         x0, y0 = _FRAME_MARGIN, _FRAME_MARGIN
-        x1, y1 = _SHEET_W - _FRAME_MARGIN, _SHEET_H - _FRAME_MARGIN
+        x1, y1 = sheet_w - _FRAME_MARGIN, sheet_h - _FRAME_MARGIN
         for p1, p2 in (((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)),
                        ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))):
             self._add_line(msp, p1, p2, _LAYER_FRAME, counts)
 
         # 标题栏信息：诚实原则，取不到留空不编造
-        title = self._title_info(geometry)
+        title = self._title_info(geometry, views_data)
 
         tx0, ty0 = x1 - _TITLE_W, y0
         tx1, ty1 = x1, y0 + _TITLE_H
@@ -317,10 +332,16 @@ class DxfBuildExecutor:
                            _LAYER_FRAME, counts)
 
     @staticmethod
-    def _title_info(geometry: Optional[Dict[str, Any]]) -> Dict[str, str]:
-        """标题栏内容：图号=Step2 顶层 bom path 文件名去扩展名，名称=bom name；
-        材料取 materials 首个值；取不到一律空字符串（诚实原则）"""
-        info = {"drawing_number": "", "name": "", "scale": "1:1", "material": ""}
+    def _title_info(geometry: Optional[Dict[str, Any]],
+                    views_data: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+        """标题栏：图号/名称取 Step2 顶层 bom；比例=Step3 实际 scale（禁止写死）；
+        材料：唯一材料直接填，多材料（焊合惯例）→ "见明细表"，取不到留空"""
+        info = {"drawing_number": "", "name": "", "scale": "", "material": ""}
+        for view in (views_data or {}).get("views") or []:
+            scale = view.get("scale")
+            if isinstance(scale, str) and scale.strip():
+                info["scale"] = scale.strip()
+                break
         if not isinstance(geometry, dict):
             return info
         bom = geometry.get("bom") or []
@@ -332,8 +353,16 @@ class DxfBuildExecutor:
             info["name"] = str(bom[0].get("name") or "")
         materials = geometry.get("materials") or {}
         if isinstance(materials, dict) and materials:
-            first = next(iter(materials.values()))
-            info["material"] = str(first) if first else ""
+            # 兼容两种形态：{件名: 材料}（值有效）/ {材料: 计数}（键有效）
+            vals = {str(v).strip() for v in materials.values()
+                    if isinstance(v, str) and v.strip()}
+            if not vals:
+                vals = {str(k).strip() for k in materials
+                        if isinstance(k, str) and k.strip()}
+            if len(vals) == 1:
+                info["material"] = next(iter(vals))
+            elif len(vals) > 1:
+                info["material"] = "见明细表"
         return info
 
     def _draw_view(self, msp, view: Dict[str, Any],
@@ -375,17 +404,29 @@ class DxfBuildExecutor:
                                f"type {etype!r} in view '{name}', skipped")
 
         for hidden in view.get("hidden_lines") or []:
-            self._add_line(
-                msp,
-                _translate((hidden["x1"], hidden["y1"]), view_pos, scale),
-                _translate((hidden["x2"], hidden["y2"]), view_pos, scale),
-                _LAYER_HIDDEN, counts)
+            self._draw_typed(msp, hidden, view_pos, scale, _LAYER_HIDDEN, counts)
         for center_line in view.get("center_lines") or []:
-            self._add_line(
-                msp,
-                _translate((center_line["x1"], center_line["y1"]), view_pos, scale),
-                _translate((center_line["x2"], center_line["y2"]), view_pos, scale),
-                _LAYER_CENTER, counts)
+            self._draw_typed(msp, center_line, view_pos, scale, _LAYER_CENTER, counts)
+
+    def _draw_typed(self, msp, ent: Dict[str, Any], view_pos: Dict[str, Any],
+                    scale: float, layer: str, counts: Dict[str, int]) -> None:
+        """隐藏线/中心线落图：SW 提取含 line/circle/arc，按类型分发（同轮廓线约定）"""
+        etype = ent.get("type")
+        if etype == "circle":
+            msp.add_circle(_translate((ent["cx"], ent["cy"]), view_pos, scale),
+                           radius=ent["r"] * scale, dxfattribs={"layer": layer})
+            counts["circle"] = counts.get("circle", 0) + 1
+        elif etype == "arc":
+            msp.add_arc(_translate((ent["cx"], ent["cy"]), view_pos, scale),
+                        radius=ent["r"] * scale,
+                        start_angle=ent["start_angle"], end_angle=ent["end_angle"],
+                        dxfattribs={"layer": layer})
+            counts["arc"] = counts.get("arc", 0) + 1
+        else:  # line 及未标注类型的两点线段（兼容旧数据）
+            self._add_line(msp,
+                           _translate((ent["x1"], ent["y1"]), view_pos, scale),
+                           _translate((ent["x2"], ent["y2"]), view_pos, scale),
+                           layer, counts)
 
     def _infer_view_name(self, dim: Dict[str, Any],
                          views_by_name: Dict[str, Any]) -> Optional[str]:
@@ -489,7 +530,17 @@ class DxfBuildExecutor:
         rows: List[List[Any]] = list(bom_table.get("rows") or [])
         if not columns:
             return
-        col_w = width / len(columns)
+        # 列宽：优先 style.column_widths（Step5 内容适配），归一化到表宽；缺省均分
+        cw = style.get("column_widths")
+        if (isinstance(cw, list) and len(cw) == len(columns)
+                and all(isinstance(v, (int, float)) and v > 0 for v in cw)):
+            total = float(sum(cw))
+            col_ws = [float(v) / total * width for v in cw]
+        else:
+            col_ws = [width / len(columns)] * len(columns)
+        col_xs = [x]
+        for w in col_ws:
+            col_xs.append(col_xs[-1] + w)
         total_h = header_h + row_h * len(rows)
 
         # 外框 + 横线 + 竖线
@@ -501,21 +552,21 @@ class DxfBuildExecutor:
             ly = y + total_h - header_h - i * row_h
             self._add_line(msp, (x, ly), (x + width, ly), _LAYER_BOM, counts)
         for i in range(1, len(columns)):
-            lx = x + i * col_w
+            lx = col_xs[i]
             self._add_line(msp, (lx, y), (lx, y + total_h), _LAYER_BOM, counts)
 
         pad = 1.0
         # 表头（顶部一行）
         header_y = y + total_h - header_h + (header_h - font) / 2.0
         for ci, col in enumerate(columns):
-            self._add_text(msp, str(col), x + ci * col_w + pad, header_y,
+            self._add_text(msp, str(col), col_xs[ci] + pad, header_y,
                            font, _LAYER_BOM, counts)
         # 数据行（自上而下）
         for ri, row in enumerate(rows):
             cell_y = y + total_h - header_h - (ri + 1) * row_h + (row_h - font) / 2.0
             for ci in range(len(columns)):
                 value = row[ci] if ci < len(row) else ""
-                self._add_text(msp, str(value), x + ci * col_w + pad, cell_y,
+                self._add_text(msp, str(value), col_xs[ci] + pad, cell_y,
                                font, _LAYER_BOM, counts)
 
     def _draw_tech_requirements(self, msp, tech: Dict[str, Any],

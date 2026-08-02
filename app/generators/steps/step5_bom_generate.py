@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from app.generators.models import StepContext
+from app.generators.steps.step3_view_project import _SHEET_SIZES
 from app.core.exceptions import SWException, ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -302,10 +303,60 @@ class BomGenerateExecutor:
                 remark,
             ])
 
+        # 图幅适配：sheet 取 Step3 layout.sheet_size（缺省 A3）；默认定位右对齐图框
+        layout = (ctx.previous_results.get(3) or {}).get("layout") or {}
+        sheet_w, sheet_h = _SHEET_SIZES.get(
+            layout.get("sheet_size"), _SHEET_SIZES["A3"])
+        position, style = cfg["position"], cfg["style"]
+        pos_override = (ctx.parameters.get("bom_config") or {}).get("position") or {}
+        if "x" not in pos_override:
+            position["x"] = sheet_w - 20.0 - position["width"]
+        warnings: List[str] = []
+        # 表体不得超出图幅有效区（仅默认定位自动适配；覆盖定位由调用方负责）：
+        # 先压缩行高（下限 font×1.2），仍超限 → 截断；均如实写入 warnings
+        max_h = sheet_h - 10.0 - position["y"]
+        if "x" not in pos_override and "y" not in pos_override:
+            height = style["header_height"] + style["row_height"] * len(rows)
+            if height > max_h:
+                min_row_h = round(style["font_size"] * 1.2, 4)
+                fit_row_h = (max_h - style["header_height"]) / len(rows)
+                if fit_row_h >= min_row_h:
+                    warnings.append(
+                        f"BOM 行高压缩 {style['row_height']}→{round(fit_row_h, 4)}mm "
+                        f"以适配 {layout.get('sheet_size', 'A3')} 图幅")
+                    style["row_height"] = round(fit_row_h, 4)
+                else:
+                    keep = max(1, int((max_h - style["header_height"]) // min_row_h))
+                    warnings.append(
+                        f"BOM {len(rows)} 行超出图幅有效区，截断为 {keep} 行 "
+                        f"（行高下限 {min_row_h}mm）")
+                    style["row_height"] = min_row_h
+                    rows = rows[:keep]
+        # 列宽：图号/名称列按内容长度换算（汉字≈font，ASCII≈0.55×font），超出当前
+        # 份额时加宽（Step7 归一化到表宽），禁止静默压穿
+        cw = list(style["column_widths"])
+        font = style["font_size"]
+        total_cw = sum(cw)
+        width = position["width"]
+
+        def _text_w(s: Any) -> float:
+            return sum(font if ord(c) > 127 else 0.55 * font for c in str(s)) + 2.0
+
+        for ci, header in ((1, "图号"), (2, "名称")):
+            need = max([_text_w(header)] + [_text_w(r[ci]) for r in rows])
+            allotted = cw[ci] / total_cw * width
+            if need > allotted:
+                cw[ci] = need * total_cw / width
+                warnings.append(f"{header}列加宽至内容所需 {round(need, 2)}mm")
+        style["column_widths"] = [round(v, 4) for v in cw]
+
+        for w in warnings:
+            logger.warning(f"[Task:{ctx.task_id}] step5: {w}")
+
         # BOM 高度按实际行数动态计算（此处 rows>=1，空表已在前面抛错），
         # 覆盖 config 给的静态 height，保证表格始终贴在标题栏正上方
-        cfg["position"]["height"] = (
-            cfg["style"]["header_height"] + cfg["style"]["row_height"] * len(rows)
+        position["height"] = (
+            style["header_height"] + style["row_height"] * len(rows)
         )
 
         result: Dict[str, Any] = {
@@ -318,6 +369,8 @@ class BomGenerateExecutor:
             # 质量门禁对齐：Step2 原始条目数，便于 BOM 一致性核对
             "source_total_items": len(bom),
         }
+        if warnings:
+            result["warnings"] = warnings
 
         output_dir = ctx.get_output_path("")
         output_dir.mkdir(parents=True, exist_ok=True)

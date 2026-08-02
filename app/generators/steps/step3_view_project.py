@@ -1,13 +1,13 @@
 """
 Step 3: 视图投影
 
-技术路线（2026-07-30 老板批准 SW API 路线，docs/SW-API侦察报告-2026-07-30）：
-- 主路径（sw_api）：SW 工程图视图作为投影引擎（sw_drawing + view_extractor），
-  输出带真实几何参数（真圆/真线）的契约 entities
-- 回退路径（stl）：STL + trimesh 正交投影（无 SW 环境备用，不删除）
+技术路线（2026-08-01 老板批示：SW 原生导出 DXF，取代逐边提取；SW API 原生优先）：
+- 唯一路径（sw_api）：sw_drawing.export_dxf_sync 插入三视图后 SW 原生 SaveAs
+  导出 DXF，view_extractor.parse_exported_dxf 按视图区域/线型归一化为契约 entities
 
-引擎选择：ctx.parameters["engine"] = "sw_api" | "stl" | "auto"（默认 auto：
-先试 SW API，SW 不可用（GEN_SW_NOT_AVAILABLE）时回退 STL；其他错误直接上抛）
+引擎选择：ctx.parameters["engine"] 仅支持 "sw_api"（默认）；
+SW 不可用 → 直接 SWException(GEN_SW_NOT_AVAILABLE)，无回退路径
+（2026-08-01 老板铁律：SW API 原生优先，STL/trimesh 回退路径已删除）
 
 契约不变：views.json 结构与 docs/plans/04 第二节一致
 
@@ -15,28 +15,38 @@ Step 3: 视图投影
 - entities/hidden_lines/center_lines：视图局部坐标（实际尺寸 mm），
   原点 = 视图包围盒左下角（本模块 _build_layout 统一归一化，两条引擎路径同一契约）
 - scale：GB 标准比例字符串（如 "1:50"），由布局引擎按图幅可用区域自动计算
-- layout.view_positions：图纸坐标（A3 图幅 mm，已含比例），
+- layout.view_positions：图纸坐标（图幅 mm，已含比例；图幅 A3→A0 自动选型），
+  第一角布局：俯视在主视正下方、左视在主视正右方
   Step7 落图公式：图纸坐标 = view_position + 实体局部坐标 × (1/比例分母)
 """
 
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.generators.models import StepContext
 from app.generators.sw_com import run_sw
-from app.generators.view_extractor import bounding_box_of
+from app.generators.view_extractor import bounding_box_of, parse_exported_dxf
 from app.core.exceptions import SWException, ErrorCode
 
 logger = logging.getLogger(__name__)
 
-# ---- 布局常量（单位：mm；图纸坐标系 = A3 横向图幅）----
-_SHEET_W = 420.0        # A3 横向宽
-_SHEET_H = 297.0        # A3 横向高
-_LAYOUT_MARGIN = 20.0   # 视图区起始边距
-_LAYOUT_GAP_X = 40.0    # 视图水平间距
-_LAYOUT_GAP_Y = 20.0    # 视图换行垂直间距
+# ---- 布局常量（单位：mm；图纸坐标系 = 横向图幅，y 向上）----
+# GB A 系列横向图幅（选型按 A3→A0 升序）
+_SHEET_SIZES = {
+    "A3": (420.0, 297.0), "A2": (594.0, 420.0),
+    "A1": (841.0, 594.0), "A0": (1189.0, 841.0),
+}
+_BASE_SHEET = "A3"      # 比例决策基准图幅（保持既有比例行为不漂移）
+_LAYOUT_MARGIN = 20.0   # 视图区边距
+_LAYOUT_GAP_X = 40.0    # 视图水平间距（含标注空间）
+_LAYOUT_GAP_Y = 20.0    # 视图垂直间距（含标注空间）
+# BOM 估计（图幅选型用，与 step5 默认值对齐）
+_BOM_BASE_Y = 50.0      # BOM 表底边（标题栏顶）图纸 y
+_BOM_HEADER_EST = 20.0
+_BOM_ROW_H_EST = 15.0
+_FRAME_MARGIN = 10.0
 # GB 标准缩小比例系列（1:N），自动比例向下取该系列
 _GB_SCALES = (1, 2, 2.5, 5, 10, 20, 50, 100)
 
@@ -47,98 +57,6 @@ _VIEW_DEFS = {
     "top": {"display_name": "俯视图", "axes": (0, 1)},
     "left": {"display_name": "左视图", "axes": (1, 2)},
 }
-
-
-def _export_stl_sync(source_file: str, stl_path: str) -> str:
-    """【同步/COM线程】打开 SW 文档并另存为 STL 文件"""
-    from app.parsers.sw_parser import SWParser  # 延迟导入，避免无 SW 环境时模块加载失败
-
-    parser = SWParser()
-    try:
-        doc = parser.open_document(source_file)
-        if doc is None:
-            raise SWException(
-                f"Failed to open document: {source_file}",
-                error_code=ErrorCode.GEN_SW_NOT_AVAILABLE,
-            )
-        # SaveAs3(Name, Version=swSaveAsCurrentVersion, Options)
-        doc.SaveAs3(str(stl_path), 0, 0)
-        if not Path(stl_path).exists():
-            raise SWException(
-                f"STL export failed: {stl_path}",
-                error_code=ErrorCode.GEN_SW_NOT_AVAILABLE,
-            )
-        return stl_path
-    finally:
-        try:
-            parser.close_document(source_file)
-        except Exception as e:
-            logger.warning(f"Failed to close document: {e}")
-        try:
-            parser.quit()
-        except Exception as e:
-            logger.warning(f"Failed to quit SW parser: {e}")
-
-
-def project_mesh(mesh: Any, view_name: str) -> Dict[str, Any]:
-    """
-    正交投影提取 2D 轮廓（纯几何，不依赖 SW，可单测）
-
-    将 mesh 三角面片投影到视图平面，shapely unary_union 合并后取外轮廓，
-    离散为 line 实体序列，并计算 bounding_box。
-    """
-    from shapely.geometry import Polygon
-    from shapely.ops import unary_union
-
-    u, v = _VIEW_DEFS[view_name]["axes"]
-    polys = []
-    for tri in mesh.triangles:
-        poly = Polygon([(float(p[u]), float(p[v])) for p in tri])
-        if not poly.is_empty and poly.area > 1e-12:
-            polys.append(poly.buffer(0) if not poly.is_valid else poly)
-    if not polys:
-        raise SWException(
-            f"Empty projection for view: {view_name}",
-            error_code=ErrorCode.GEN_STEP_FAILED,
-        )
-
-    merged = unary_union(polys)
-    geoms = list(merged.geoms) if merged.geom_type in ("MultiPolygon", "GeometryCollection") else [merged]
-
-    entities: List[Dict[str, Any]] = []
-    for geom in geoms:
-        if geom.geom_type != "Polygon" or geom.is_empty:
-            continue
-        coords = list(geom.exterior.coords)
-        for i in range(len(coords) - 1):
-            (x1, y1), (x2, y2) = coords[i], coords[i + 1]
-            entities.append({
-                "type": "line",
-                "x1": round(x1, 4), "y1": round(y1, 4),
-                "x2": round(x2, 4), "y2": round(y2, 4),
-            })
-    if not entities:
-        raise SWException(
-            f"No outline entities for view: {view_name}",
-            error_code=ErrorCode.GEN_STEP_FAILED,
-        )
-
-    xs = [e["x1"] for e in entities] + [e["x2"] for e in entities]
-    ys = [e["y1"] for e in entities] + [e["y2"] for e in entities]
-    return {
-        "name": view_name,
-        "display_name": _VIEW_DEFS[view_name]["display_name"],
-        "projection": "first_angle",
-        "entities": entities,
-        "hidden_lines": [],   # M2 占位（结构预留）
-        "center_lines": [],   # M2 占位（结构预留）
-        "section_hatch": None,  # M2 占位（契约键预留，剖面线 M3 实现）
-        "bounding_box": {
-            "min_x": round(min(xs), 4), "min_y": round(min(ys), 4),
-            "max_x": round(max(xs), 4), "max_y": round(max(ys), 4),
-        },
-        "scale": "1:1",
-    }
 
 
 def _shift_entities(entities: List[Dict[str, Any]], dx: float, dy: float) -> None:
@@ -176,42 +94,64 @@ def _normalize_view(view: Dict[str, Any], task_id: str = "") -> None:
     }
 
 
-def _tile_positions(sizes: List[Tuple[str, float, float]],
-                    den: float) -> Dict[str, Any]:
-    """按缩放后尺寸平铺排布（起始边距 20mm，超宽换行），返回图纸坐标 positions"""
-    positions: Dict[str, Any] = {}
-    x = y = _LAYOUT_MARGIN
-    row_h = 0.0
-    for name, w0, h0 in sizes:
-        w = round(w0 / den, 4)
-        h = round(h0 / den, 4)
-        if x + w > _SHEET_W - _LAYOUT_MARGIN and x > _LAYOUT_MARGIN:
-            x = _LAYOUT_MARGIN
-            y += row_h + _LAYOUT_GAP_Y
-            row_h = 0.0
-        positions[name] = {
-            "x": round(x, 4), "y": round(y, 4), "width": w, "height": h}
+def _pos(x: float, y: float, w: float, h: float) -> Dict[str, Any]:
+    return {"x": round(x, 4), "y": round(y, 4),
+            "width": round(w, 4), "height": round(h, 4)}
+
+
+def _first_angle_positions(sizes: List[Tuple[str, float, float]],
+                           den: float, sheet_w: float,
+                           sheet_h: float) -> Optional[Dict[str, Any]]:
+    """第一角布局：主视锚定左上；俯视在主视正下方（x 对齐）、左视在主视
+    正右方（顶对齐）；其余视图主列下方平铺。y 向上。超界 → None（重试）"""
+    scaled = {n: (w0 / den, h0 / den) for n, w0, h0 in sizes}
+    order = [n for n, _, _ in sizes]
+    anchor = "front" if "front" in scaled else order[0]
+    aw, ah = scaled[anchor]
+    if (aw > sheet_w - 2 * _LAYOUT_MARGIN
+            or ah > sheet_h - 2 * _LAYOUT_MARGIN):
+        return None
+    ax, ay = _LAYOUT_MARGIN, sheet_h - _LAYOUT_MARGIN - ah
+    positions: Dict[str, Any] = {anchor: _pos(ax, ay, aw, ah)}
+    bottom = ay
+    if anchor == "front":
+        if "top" in scaled:
+            tw, th = scaled["top"]
+            ty = ay - _LAYOUT_GAP_Y - th
+            if ty < _LAYOUT_MARGIN:
+                return None
+            positions["top"] = _pos(ax, ty, tw, th)
+            bottom = ty
+        if "left" in scaled:
+            lw, lh = scaled["left"]
+            if ax + aw + _LAYOUT_GAP_X + lw > sheet_w - _LAYOUT_MARGIN:
+                return None
+            positions["left"] = _pos(ax + aw + _LAYOUT_GAP_X,
+                                     ay + ah - lh, lw, lh)
+    x, y, row_h = _LAYOUT_MARGIN, bottom - _LAYOUT_GAP_Y, 0.0
+    for name in order:
+        if name in positions:
+            continue
+        w, h = scaled[name]
+        if x + w > sheet_w - _LAYOUT_MARGIN and x > _LAYOUT_MARGIN:
+            x, y, row_h = _LAYOUT_MARGIN, y - row_h - _LAYOUT_GAP_Y, 0.0
+        if y - h < _LAYOUT_MARGIN:
+            return None
+        positions[name] = _pos(x, y - h, w, h)
         x += w + _LAYOUT_GAP_X
         row_h = max(row_h, h)
     return positions
 
 
-def _positions_fit(positions: Dict[str, Any]) -> bool:
-    """全部视图（含宽高范围）都落在图幅可用区内"""
-    eps = 1e-6
-    return all(
-        p["x"] >= -eps and p["y"] >= -eps
-        and p["x"] + p["width"] <= _SHEET_W - _LAYOUT_MARGIN + eps
-        and p["y"] + p["height"] <= _SHEET_H - _LAYOUT_MARGIN + eps
-        for p in positions.values()
-    )
-
-
-def _compute_scale_denominator(views: List[Dict[str, Any]], task_id: str = "") -> float:
+def _compute_scale_denominator(views: List[Dict[str, Any]], task_id: str = "",
+                               sheet: str = _BASE_SHEET) -> float:
     """
     自动比例：按“全部视图适配单图幅”计算——对 GB 标准比例系列从小到大
-    模拟排布，第一个让所有视图（含间距/换行）落进 A3 可用区的比例胜出；
+    模拟排布，第一个让所有视图（含间距/换行）落进指定图幅可用区的比例胜出；
     超出 1:100 仍装不下 → 截断并 warning。空视图/全零尺寸 → SWException。
+
+    sheet：比例决策基准图幅（缺省 A3 保持既有行为；图幅升级后应按最终图幅
+    重算，避免“A3 比例放到 A0 图幅”导致视图缩成小簇——2026-08-01 实测根因）
     """
     if not views:
         raise SWException(
@@ -233,37 +173,68 @@ def _compute_scale_denominator(views: List[Dict[str, Any]], task_id: str = "") -
             task_id=task_id,
             step=3,
         )
+    bw, bh = _SHEET_SIZES[sheet]
     for n in _GB_SCALES:
-        if _positions_fit(_tile_positions(sizes, float(n))):
+        if _first_angle_positions(sizes, float(n), bw, bh) is not None:
             return float(n)
-    logger.warning(f"[Task:{task_id}] step3: views do not fit A3 even at "
-                   f"1:{_GB_SCALES[-1]}, clamped (layout may overflow)")
+    logger.warning(f"[Task:{task_id}] step3: views do not fit {sheet} "
+                   f"even at 1:{_GB_SCALES[-1]}, clamped (layout may overflow)")
     return float(_GB_SCALES[-1])
 
 
-def _build_layout(views: List[Dict[str, Any]], task_id: str = "") -> Dict[str, Any]:
+def _select_sheet(sizes: List[Tuple[str, float, float]], den: float,
+                  bom_rows: int = 0, task_id: str = "") -> str:
+    """图幅选型：A3→A0 取首个同时装下 视图第一角布局 与 BOM 估计高度 的图幅"""
+    bom_h = (_BOM_HEADER_EST + _BOM_ROW_H_EST * bom_rows) if bom_rows else 0.0
+    for name, (w, h) in _SHEET_SIZES.items():
+        if _first_angle_positions(sizes, den, w, h) is None:
+            continue
+        if bom_h and _BOM_BASE_Y + bom_h > h - _FRAME_MARGIN:
+            continue
+        return name
+    logger.warning(f"[Task:{task_id}] step3: content exceeds A0, "
+                   f"fallback to A0 (layout may overflow)")
+    return "A0"
+
+
+def _build_layout(views: List[Dict[str, Any]], task_id: str = "",
+                  bom_rows: int = 0) -> Dict[str, Any]:
     """
-    布局引擎（比例决策点）：
-    1) 各视图实体归一化（原点 = 视图左下角，实际尺寸 mm）
-    2) 自动比例：模拟排布取第一个整图幅适配的 GB 标准比例
-    3) view_positions 输出图纸坐标：按缩放后尺寸平铺（起始边距 20mm，超宽换行）
+    布局引擎：1) 实体归一化 2) 基准图幅（A3）模拟第一角布局取 GB 比例
+    3) A3→A0 图幅选型（含 BOM 估计高度） 4) 输出第一角 view_positions
     """
     for vw in views:
         _normalize_view(vw, task_id)
-    den = _compute_scale_denominator(views, task_id)
-    scale_str = f"1:{den:g}"
-    for vw in views:
-        vw["scale"] = scale_str
     sizes = [
         (vw["name"],
          vw["bounding_box"]["max_x"] - vw["bounding_box"]["min_x"],
          vw["bounding_box"]["max_y"] - vw["bounding_box"]["min_y"])
         for vw in views
     ]
-    positions = _tile_positions(sizes, den)
-    logger.info(f"[Task:{task_id}] step3 layout: scale={scale_str}, "
+    den = _compute_scale_denominator(views, task_id)
+    sheet = _select_sheet(sizes, den, bom_rows, task_id)
+    if sheet != _BASE_SHEET:
+        # 图幅被 BOM/布局升级到更大图幅：按最终图幅重算比例，
+        # 否则“A3 适配的比例”放到 A0 上视图缩成一小簇（2026-08-01 老板验收根因）
+        den2 = _compute_scale_denominator(views, task_id, sheet)
+        if den2 != den:
+            logger.info(f"[Task:{task_id}] step3: sheet upgraded {_BASE_SHEET}->"
+                        f"{sheet}, scale recomputed 1:{den:g} -> 1:{den2:g}")
+            den = den2
+    scale_str = f"1:{den:g}"
+    for vw in views:
+        vw["scale"] = scale_str
+    w, h = _SHEET_SIZES[sheet]
+    positions = _first_angle_positions(sizes, den, w, h)
+    if positions is None:
+        # 比例截断 1:100 仍超图幅：告警后按超大图幅排布（允许溢出，不静默）
+        logger.warning(f"[Task:{task_id}] step3: layout overflows {sheet} "
+                       f"at 1:{den:g}, positions may exceed sheet")
+        positions = _first_angle_positions(sizes, den, 1e6, 1e6)
+    logger.info(f"[Task:{task_id}] step3 layout: sheet={sheet}, scale={scale_str}, "
                 f"positions={ {k: (p['x'], p['y']) for k, p in positions.items()} }")
-    return {"sheet_size": "A3", "orientation": "landscape", "view_positions": positions}
+    return {"sheet_size": sheet, "orientation": "landscape",
+            "view_positions": positions}
 
 
 class ViewProjectExecutor:
@@ -271,10 +242,25 @@ class ViewProjectExecutor:
     Step 3 执行器: 视图投影
 
     输入: ctx.parameters["source_file"]、ctx.parameters["views"]（默认 front/top/left）、
-          ctx.parameters["engine"]（默认 auto）
+          ctx.parameters["engine"]（仅支持 "sw_api"，默认）
     输出: {"views": [...], "layout": {...}}，完整 JSON 落盘 output/views.json
-    无 SW 环境 → auto 模式回退 STL 路径；sw_api 模式直接 SWException(GEN_SW_NOT_AVAILABLE)
+    SW 不可用 → 直接 SWException(GEN_SW_NOT_AVAILABLE)，无回退路径
     """
+
+    @staticmethod
+    def _estimate_bom_rows(previous_results: Dict[int, Any]) -> int:
+        """估计聚合后 BOM 行数（同图号去重、排除抑制件），用于图幅选型；异常 → 0"""
+        try:
+            geom = previous_results.get(2) or {}
+            keys = set()
+            for item in geom.get("bom") or []:
+                if not isinstance(item, dict) or item.get("is_suppressed"):
+                    continue
+                stem = Path(str(item.get("path") or "")).stem.strip()
+                keys.add(stem or str(item.get("name") or ""))
+            return len(keys)
+        except Exception:
+            return 0
 
     async def __call__(self, ctx: StepContext) -> Dict[str, Any]:
         source_file = ctx.parameters.get("source_file", "")
@@ -304,8 +290,8 @@ class ViewProjectExecutor:
                     step=ctx.step,
                 )
 
-        engine = ctx.parameters.get("engine", "auto")
-        if engine not in ("sw_api", "stl", "auto"):
+        engine = ctx.parameters.get("engine", "sw_api")
+        if engine != "sw_api":
             raise SWException(
                 f"Unsupported engine: {engine}",
                 error_code=ErrorCode.GEN_UNSUPPORTED_FEATURE,
@@ -315,91 +301,49 @@ class ViewProjectExecutor:
 
         output_dir = ctx.get_output_path("")
         output_dir.mkdir(parents=True, exist_ok=True)
+        bom_rows = self._estimate_bom_rows(ctx.previous_results)
 
-        # 1) SW API 主路径
-        if engine in ("sw_api", "auto"):
-            from app.generators import sw_drawing  # 延迟导入，无 SW 环境可加载本模块
-            try:
-                logger.info(f"[Task:{ctx.task_id}] SW API projection {view_names} from {source_file}")
-                sw_result = await run_sw(
-                    sw_drawing.extract_views_sync, source_file, list(view_names))
-                views = sw_result["views"]
-                for w in sw_result.get("warnings", []):
-                    logger.warning(f"[Task:{ctx.task_id}] step3: {w}")
-                result: Dict[str, Any] = {"views": views,
-                                          "layout": _build_layout(views, ctx.task_id)}
-                if sw_result.get("warnings"):
-                    result["warnings"] = sw_result["warnings"]
-                views_file = output_dir / "views.json"
-                with open(views_file, "w", encoding="utf-8") as f:
-                    json.dump(result, f, ensure_ascii=False, indent=2)
-                logger.info(f"[Task:{ctx.task_id}] SW API projection done -> {views_file}")
-                return result
-            except SWException as e:
-                if engine == "sw_api" or e.error_code != ErrorCode.GEN_SW_NOT_AVAILABLE:
-                    raise
-                logger.warning(
-                    f"[Task:{ctx.task_id}] SW API unavailable ({e.message}), "
-                    "fallback to STL projection")
-            except Exception as e:
-                logger.exception(f"[Task:{ctx.task_id}] SW API projection failed: {e}")
-                if engine == "sw_api":
-                    raise SWException(
-                        f"SW API projection failed: {e}",
-                        error_code=ErrorCode.GEN_SW_NOT_AVAILABLE,
-                        task_id=ctx.task_id,
-                        step=ctx.step,
-                        detail=str(e),
-                    )
-                logger.warning(f"[Task:{ctx.task_id}] fallback to STL projection")
-
-        # 2) STL 回退路径
-        result = await self._project_via_stl(ctx, source_file, view_names, output_dir)
-        views_file = output_dir / "views.json"
-        with open(views_file, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        logger.info(f"[Task:{ctx.task_id}] View projection done: {len(result['views'])} views -> {views_file}")
-        return result
-
-    async def _project_via_stl(self, ctx: StepContext, source_file: str,
-                               view_names: List[str], output_dir: Path) -> Dict[str, Any]:
-        """STL/trimesh 回退路径（无 SW 环境备用）"""
-        stl_path = output_dir / "model.stl"
-
-        # 1) SW 导出 STL（COM 线程）
+        # SW 原生导出 DXF（唯一路径）：COM 导出 → ezdxf 解析归一化
+        from app.generators import sw_drawing  # 延迟导入，无 SW 环境可加载本模块
         try:
-            await run_sw(_export_stl_sync, source_file, str(stl_path))
+            logger.info(f"[Task:{ctx.task_id}] SW native DXF export {view_names} from {source_file}")
+            sw_result = await run_sw(
+                sw_drawing.export_dxf_sync, source_file, list(view_names),
+                str(output_dir), bom_rows, ctx.task_id)
+            for w in sw_result.get("warnings", []):
+                logger.warning(f"[Task:{ctx.task_id}] step3: {w}")
         except SWException:
             raise
         except Exception as e:
-            logger.exception(f"[Task:{ctx.task_id}] STL export failed: {e}")
+            logger.exception(f"[Task:{ctx.task_id}] SW native DXF export failed: {e}")
             raise SWException(
-                f"STL export failed: {e}",
+                f"SW native DXF export failed: {e}",
                 error_code=ErrorCode.GEN_SW_NOT_AVAILABLE,
                 task_id=ctx.task_id,
                 step=ctx.step,
                 detail=str(e),
             )
 
-        # 2) trimesh 加载 + 三向正交投影
-        import trimesh  # 延迟导入，保持无 trimesh 环境下模块可加载
-        try:
-            loaded = trimesh.load(str(stl_path))
-            if isinstance(loaded, trimesh.Trimesh):
-                mesh = loaded
-            elif isinstance(loaded, trimesh.Scene):
-                mesh = loaded.to_mesh()
-            else:
-                raise TypeError(f"Unsupported geometry type: {type(loaded).__name__}")
-        except Exception as e:
-            logger.exception(f"Failed to load STL geometry: {e}")
-            raise SWException(
-                f"Failed to load STL geometry: {e}",
-                error_code=ErrorCode.GEN_STEP_FAILED,
-                task_id=ctx.task_id,
-                step=ctx.step,
-                detail=str(e),
-            )
+        # 纯 Python 解析归一化（不碰 SW）：区域分配 + 线型分类 + 坐标换算
+        parse_result = parse_exported_dxf(
+            sw_result["dxf_path"], sw_result["positions"],
+            sw_result["scale_den"], list(view_names), ctx.task_id)
+        warnings = list(sw_result.get("warnings") or []) + \
+            list(parse_result.get("warnings") or [])
+        for w in parse_result.get("warnings", []):
+            logger.warning(f"[Task:{ctx.task_id}] step3: {w}")
+        result: Dict[str, Any] = {
+            "views": parse_result["views"],
+            "layout": {"sheet_size": sw_result["sheet"],
+                       "orientation": "landscape",
+                       # 契约：view_positions 直接用实际插入位置
+                       "view_positions": sw_result["positions"]},
+        }
+        if warnings:
+            result["warnings"] = warnings
 
-        views = [project_mesh(mesh, name) for name in view_names]
-        return {"views": views, "layout": _build_layout(views, ctx.task_id)}
+        views_file = output_dir / "views.json"
+        with open(views_file, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        logger.info(f"[Task:{ctx.task_id}] SW API projection done -> {views_file}")
+        return result

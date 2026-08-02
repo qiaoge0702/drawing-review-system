@@ -42,7 +42,7 @@
 
 | 层级 | 技术 | 说明 |
 |------|------|------|
-| 3D解析 | pywin32 / trimesh | SW API或STEP解析 |
+| 3D解析 | pywin32 | 一律走 SW 原生 API（含视图/DXF导出） |
 | 2D生成 | ezdxf + Pillow | DXF构建+渲染验证 |
 | DWG转换 | ODA File Converter | DXF→DWG |
 | AI模型 | Kimi K3 / GPT-4o | Vision+Text多模态 |

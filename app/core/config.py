@@ -98,7 +98,16 @@ class SWConfig(BaseSettings):
 
     drawing_template: str = Field(
         default=r"C:\ProgramData\SolidWorks\SOLIDWORKS 2025\templates\gb_a3.drwdot",
-        description="工程图模板路径（国标 A3）"
+        description="工程图模板路径（默认 A3，兼作按图幅映射的缺省）"
+    )
+    drawing_templates: Dict[str, str] = Field(
+        default={
+            "A3": r"C:\ProgramData\SolidWorks\SOLIDWORKS 2025\templates\gb_a3.drwdot",
+            "A2": r"C:\ProgramData\SolidWorks\SOLIDWORKS 2025\templates\gb_a2.drwdot",
+            "A1": r"C:\ProgramData\SolidWorks\SOLIDWORKS 2025\templates\gb_a1.drwdot",
+            "A0": r"C:\ProgramData\SolidWorks\SOLIDWORKS 2025\templates\gb_a0.drwdot",
+        },
+        description="按图幅映射的工程图模板（Step3 原生导出 DXF 方案用，缺省回退 drawing_template）"
     )
     predefined_view_names: Dict[str, str] = Field(
         default={"front": "*前视", "top": "*上视", "left": "*左视"},
