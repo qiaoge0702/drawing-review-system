@@ -45,6 +45,11 @@ export const api = {
     });
   },
 
+  /** 步骤真图快照 URL（方案B，直接用于 <img src>） */
+  snapshotUrl(taskId, step) {
+    return `${BASE}/${taskId}/steps/${step}/snapshot`;
+  },
+
   /** 产物下载 URL（直接用于 <a href> 或 <img src>） */
   artifactUrl(taskId, step, filename) {
     return `${BASE}/${taskId}/artifacts/${step}/${encodeURIComponent(filename)}`;

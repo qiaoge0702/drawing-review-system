@@ -100,6 +100,18 @@ function bindEvents() {
     }
   });
 
+  // 快照缩略图 → 大图灯箱（事件委托）
+  $('#main-content').addEventListener('click', (e) => {
+    const img = e.target.closest('.snapshot-thumb');
+    if (!img) return;
+    const box = $('#lightbox');
+    box.querySelector('img').src = img.dataset.full || img.src;
+    box.classList.remove('hidden');
+  });
+  $('#lightbox').addEventListener('click', () => {
+    $('#lightbox').classList.add('hidden');
+  });
+
   // 历史任务点击
   $('#history-list').addEventListener('click', (e) => {
     const item = e.target.closest('.history-item');

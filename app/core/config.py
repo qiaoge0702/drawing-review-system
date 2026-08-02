@@ -109,6 +109,11 @@ class SWConfig(BaseSettings):
         },
         description="按图幅映射的工程图模板（Step3 原生导出 DXF 方案用，缺省回退 drawing_template）"
     )
+    enterprise_template: str = Field(
+        default=str(PROJECT_ROOT / "app" / "resources" / "LB26-template.drwdot"),
+        description="企业工程图模板 .drwdot（方案B：Step3 建真 SLDDRW 用；"
+                    "spikes/001 S-3 从 LB26.SLDDRW 反存，复制到 app/resources）"
+    )
     predefined_view_names: Dict[str, str] = Field(
         default={"front": "*前视", "top": "*上视", "left": "*左视"},
         description="预定义视图名映射（中文版 SW 必须中文）"

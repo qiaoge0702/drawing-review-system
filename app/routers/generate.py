@@ -94,13 +94,31 @@ async def list_generate_tasks():
     return TaskListResponse(total=len(tasks), tasks=tasks)
 
 
-@router.get("/{task_id}", response_model=TaskResult)
+# 契约说明（只加不改）：响应在 TaskResult 基础上，steps 元素新增
+# snapshot_available / snapshot_url 两个字段，其余字段保持不变。
+@router.get("/{task_id}")
 async def get_generate_task(task_id: str):
-    """任务详情"""
+    """任务详情（steps 带出各步快照可用标记与产物路径字段）"""
     try:
-        return _svc().get_task(task_id)
+        return _svc().get_task_detail(task_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+
+
+@router.get("/{task_id}/steps/{step}/snapshot")
+async def get_step_snapshot(task_id: str, step: int):
+    """流式返回该步真图快照 preview.png；无快照返回 404 JSON"""
+    if not 1 <= step <= 8:
+        raise HTTPException(status_code=400, detail=f"step 必须在 1-8 之间: {step}")
+    try:
+        snapshot = _svc().get_step_snapshot_path(task_id, step)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404, detail=f"步骤 {step} 暂无快照（步骤未完成或快照未生成）"
+        )
+    return FileResponse(snapshot, media_type="image/png", filename="preview.png")
 
 
 @router.post("/{task_id}/rerun", response_model=GenerateResponse, status_code=202)

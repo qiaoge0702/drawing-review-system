@@ -135,6 +135,45 @@ class GenerationService:
         """列出全部任务"""
         return list(self._tasks.values())
 
+    # ─── 步骤快照（方案B：真图预览，只加不改） ───
+
+    # 快照物理位置适配层：后端 step 执行器落盘位置如有差异，在此追加候选
+    _SNAPSHOT_CANDIDATES = (
+        "step_{n}/preview.png",
+        "step_{n}/output/preview.png",
+        "output/step_{n}/preview.png",
+    )
+
+    def _task_dir(self, task_id: str) -> Path:
+        return GeneratePipeline().storage_root / task_id
+
+    def get_step_snapshot_path(self, task_id: str, step: int) -> Optional[Path]:
+        """解析某步真图快照 preview.png 的实际路径，不存在返回 None
+
+        先校验任务存在（KeyError 透传），再按候选相对路径逐个探测。
+        """
+        self.get_task(task_id)  # 不存在抛 KeyError
+        task_dir = self._task_dir(task_id)
+        for rel in self._SNAPSHOT_CANDIDATES:
+            candidate = (task_dir / rel.format(n=step)).resolve()
+            # 纵深防御：必须位于任务目录内
+            if candidate.is_relative_to(task_dir.resolve()) and candidate.is_file():
+                return candidate
+        return None
+
+    def get_task_detail(self, task_id: str) -> Dict[str, Any]:
+        """任务详情（dict），steps 数组只加不改地带出快照可用标记与快照 URL"""
+        task = self.get_task(task_id)
+        data = task.model_dump(mode="json")
+        for step_data in data.get("steps", []):
+            n = step_data.get("step")
+            snapshot = self.get_step_snapshot_path(task_id, n) if n else None
+            step_data["snapshot_available"] = snapshot is not None
+            step_data["snapshot_url"] = (
+                f"/api/generate/{task_id}/steps/{n}/snapshot" if snapshot else None
+            )
+        return data
+
     # ─── 串行工作器 ───
 
     def _ensure_worker(self):

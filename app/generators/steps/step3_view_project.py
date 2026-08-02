@@ -1,23 +1,24 @@
 """
-Step 3: 视图投影
+Step 3: 视图投影（方案B重写 2026-08-02：SW 原生真图纸骨架）
 
-技术路线（2026-08-01 老板批示：SW 原生导出 DXF，取代逐边提取；SW API 原生优先）：
-- 唯一路径（sw_api）：sw_drawing.export_dxf_sync 插入三视图后 SW 原生 SaveAs
-  导出 DXF，view_extractor.parse_exported_dxf 按视图区域/线型归一化为契约 entities
+技术路线（SW API 原生优先铁律；DXF 拆线路径已删除，view_extractor 不再被引用）：
+- 唯一路径（sw_api）：sw_drawing.create_drawing_sync —— 读模型包围盒 →
+  布局引擎按企业模板实际图幅算比例/第一角摆位 → NewDocument(.drwdot 企业模板)
+  → CreateDrawViewFromModelView3 × N（中文预定义视图名，第一角）→ 隐藏线可见
+  → 迭代重定位 → 保存中间 SLDDRW + PNG 真图快照
 
 引擎选择：ctx.parameters["engine"] 仅支持 "sw_api"（默认）；
 SW 不可用 → 直接 SWException(GEN_SW_NOT_AVAILABLE)，无回退路径
-（2026-08-01 老板铁律：SW API 原生优先，STL/trimesh 回退路径已删除）
 
-契约不变：views.json 结构与 docs/plans/04 第二节一致
+契约：views.json 原契约字段只加不改（views/layout 保留；方案B 不再产出
+ezdxf 拆线 entities，entities/hidden_lines/center_lines 如实为空列表——
+真视图在 SLDDRW 里，由 SW 原生维护，禁止编造线稿数据）；
+新增字段：drawing_path/snapshot_path/scale_denominator/sheet_size
 
-坐标系约定（2026-07-31 老板确认，专业范式：模型空间 --scale/平移--> 图纸空间）：
-- entities/hidden_lines/center_lines：视图局部坐标（实际尺寸 mm），
-  原点 = 视图包围盒左下角（本模块 _build_layout 统一归一化，两条引擎路径同一契约）
-- scale：GB 标准比例字符串（如 "1:50"），由布局引擎按图幅可用区域自动计算
-- layout.view_positions：图纸坐标（图幅 mm，已含比例；图幅 A3→A0 自动选型），
+坐标系约定（模型空间 --scale/平移--> 图纸空间）：
+- scale：GB 标准比例字符串（如 "1:50"），由布局引擎按企业模板实际图幅自动计算
+- layout.view_positions：图纸坐标（图幅 mm，已含比例，实测轮廓为准），
   第一角布局：俯视在主视正下方、左视在主视正右方
-  Step7 落图公式：图纸坐标 = view_position + 实体局部坐标 × (1/比例分母)
 """
 
 import json
@@ -27,7 +28,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.generators.models import StepContext
 from app.generators.sw_com import run_sw
-from app.generators.view_extractor import bounding_box_of, parse_exported_dxf
 from app.core.exceptions import SWException, ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,22 @@ _VIEW_DEFS = {
     "top": {"display_name": "俯视图", "axes": (0, 1)},
     "left": {"display_name": "左视图", "axes": (1, 2)},
 }
+
+
+def bounding_box_of(entities: List[Dict[str, Any]]) -> Dict[str, float]:
+    """纯 Python 包围盒（原 view_extractor.bounding_box_of 内联；
+    方案B后 view_extractor 不再被生产代码引用）"""
+    xs: List[float] = []
+    ys: List[float] = []
+    for e in entities:
+        for kx, ky in (("x1", "y1"), ("x2", "y2"), ("cx", "cy")):
+            if kx in e and ky in e:
+                xs.append(float(e[kx]))
+                ys.append(float(e[ky]))
+    if not xs:
+        return {"min_x": 0.0, "min_y": 0.0, "max_x": 0.0, "max_y": 0.0}
+    return {"min_x": min(xs), "min_y": min(ys),
+            "max_x": max(xs), "max_y": max(ys)}
 
 
 def _shift_entities(entities: List[Dict[str, Any]], dx: float, dy: float) -> None:
@@ -243,7 +259,8 @@ class ViewProjectExecutor:
 
     输入: ctx.parameters["source_file"]、ctx.parameters["views"]（默认 front/top/left）、
           ctx.parameters["engine"]（仅支持 "sw_api"，默认）
-    输出: {"views": [...], "layout": {...}}，完整 JSON 落盘 output/views.json
+    输出: {"views": [...], "layout": {...}, "drawing_path", "snapshot_path",
+           "scale_denominator", "sheet_size"}，完整 JSON 落盘 output/views.json
     SW 不可用 → 直接 SWException(GEN_SW_NOT_AVAILABLE)，无回退路径
     """
 
@@ -303,41 +320,65 @@ class ViewProjectExecutor:
         output_dir.mkdir(parents=True, exist_ok=True)
         bom_rows = self._estimate_bom_rows(ctx.previous_results)
 
-        # SW 原生导出 DXF（唯一路径）：COM 导出 → ezdxf 解析归一化
+        # 方案B：SW 原生建真 SLDDRW（唯一路径）：COM 建图纸+插真视图+快照
         from app.generators import sw_drawing  # 延迟导入，无 SW 环境可加载本模块
         try:
-            logger.info(f"[Task:{ctx.task_id}] SW native DXF export {view_names} from {source_file}")
+            logger.info(f"[Task:{ctx.task_id}] SW native drawing create {view_names} from {source_file}")
             sw_result = await run_sw(
-                sw_drawing.export_dxf_sync, source_file, list(view_names),
+                sw_drawing.create_drawing_sync, source_file, list(view_names),
                 str(output_dir), bom_rows, ctx.task_id)
             for w in sw_result.get("warnings", []):
                 logger.warning(f"[Task:{ctx.task_id}] step3: {w}")
         except SWException:
             raise
         except Exception as e:
-            logger.exception(f"[Task:{ctx.task_id}] SW native DXF export failed: {e}")
+            logger.exception(f"[Task:{ctx.task_id}] SW native drawing create failed: {e}")
             raise SWException(
-                f"SW native DXF export failed: {e}",
+                f"SW native drawing create failed: {e}",
                 error_code=ErrorCode.GEN_SW_NOT_AVAILABLE,
                 task_id=ctx.task_id,
                 step=ctx.step,
                 detail=str(e),
             )
 
-        # 纯 Python 解析归一化（不碰 SW）：区域分配 + 线型分类 + 坐标换算
-        parse_result = parse_exported_dxf(
-            sw_result["dxf_path"], sw_result["positions"],
-            sw_result["scale_den"], list(view_names), ctx.task_id)
-        warnings = list(sw_result.get("warnings") or []) + \
-            list(parse_result.get("warnings") or [])
-        for w in parse_result.get("warnings", []):
-            logger.warning(f"[Task:{ctx.task_id}] step3: {w}")
+        # 组装 views.json：契约字段只加不改。方案B 不再产出 ezdxf 拆线
+        # entities（真视图在 SLDDRW 里由 SW 原生维护）——entities 如实为空列表，
+        # bounding_box 用视图实际尺寸（未缩放 mm，原点左下角）
+        den = sw_result["scale_den"]
+        scale_str = f"1:{den:g}"
+        positions = sw_result["positions"]
+        view_sizes = sw_result.get("view_sizes") or {}
+        views: List[Dict[str, Any]] = []
+        for name in view_names:
+            vsz = view_sizes.get(name) or {}
+            views.append({
+                "name": name,
+                "display_name": _VIEW_DEFS[name]["display_name"],
+                "projection": "first_angle",
+                # 方案B：无拆线实体，如实为空（禁止编造线稿数据）
+                "entities": [],
+                "hidden_lines": [],
+                "center_lines": [],
+                "section_hatch": None,
+                "bounding_box": {
+                    "min_x": 0.0, "min_y": 0.0,
+                    "max_x": vsz.get("width", 0.0),
+                    "max_y": vsz.get("height", 0.0),
+                },
+                "scale": scale_str,
+            })
+        warnings = list(sw_result.get("warnings") or [])
         result: Dict[str, Any] = {
-            "views": parse_result["views"],
+            "views": views,
             "layout": {"sheet_size": sw_result["sheet"],
                        "orientation": "landscape",
-                       # 契约：view_positions 直接用实际插入位置
-                       "view_positions": sw_result["positions"]},
+                       # 契约：view_positions 直接用实际插入位置（实测轮廓）
+                       "view_positions": positions},
+            # 方案B重写新增字段（只加不改）
+            "drawing_path": sw_result["drawing_path"],
+            "snapshot_path": sw_result["snapshot_path"],
+            "scale_denominator": den,
+            "sheet_size": sw_result["sheet"],
         }
         if warnings:
             result["warnings"] = warnings
@@ -345,5 +386,5 @@ class ViewProjectExecutor:
         views_file = output_dir / "views.json"
         with open(views_file, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
-        logger.info(f"[Task:{ctx.task_id}] SW API projection done -> {views_file}")
+        logger.info(f"[Task:{ctx.task_id}] SW native drawing done -> {views_file}")
         return result

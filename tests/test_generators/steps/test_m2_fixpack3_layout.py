@@ -4,14 +4,11 @@ M2 收口修复包3 回归测试：视图坐标系统一 + 第一角布局 + BOM
 覆盖：
 - Step3 第一角布局（俯视在主视正下方、左视在主视正右方）+ 图幅 A3→A0 选型
 - Step5 BOM 高度图幅适配（压缩行高/截断 + warnings）+ 列宽内容适配
-- Step7 标题栏比例取 Step3 实际 scale、材料多材料→"见明细表"、
-  BOM 列宽 column_widths 消费、标注=局部+视图偏移抽样
+- Step7（方案B重写）：标题栏比例/材料/重量如实填写 + 执行器接线（mock COM 层）
 """
 
-import json
 from pathlib import Path
 
-import ezdxf
 import pytest
 
 from app.generators.models import StepContext
@@ -171,10 +168,10 @@ class TestBomFit:
 
 
 # ----------------------------------------------------------------------
-# Step7：标题栏比例/材料 + BOM 列宽 + 标注偏移抽样
+# Step7（方案B重写）：标题栏字段如实填写 + 执行器接线（mock COM 层）
 # ----------------------------------------------------------------------
 
-def _views_for_dxf(scale: str = "1:50") -> dict:
+def _views_for_drawing(scale: str = "1:50") -> dict:
     front = _view("front", 1000.0, 300.0)
     front["scale"] = scale
     return {
@@ -186,87 +183,87 @@ def _views_for_dxf(scale: str = "1:50") -> dict:
                 "front": {"x": 20.0, "y": 700.0, "width": 20.0, "height": 6.0},
             },
         },
+        # 方案B重写新增：Step3 中间 SLDDRW（Step7 在其上收尾）
+        "drawing_path": "C:/fake/step3/drawing.slddrw",
+        "snapshot_path": "C:/fake/step3/snapshot.png",
+        "scale_denominator": 50.0,
+        "sheet_size": "A0",
     }
 
 
-class TestDxfTitleAndOffsets:
+class TestTitleBlockAndFinalize:
     @pytest.mark.asyncio
-    async def test_title_scale_and_material(self, tmp_path):
+    async def test_title_scale_and_material(self, tmp_path, monkeypatch):
         """比例取 Step3 实际 scale（1:50，禁止写死 1:1）；
         多材料（{材料:计数} 形态）→ "见明细表"，禁止填计数数字"""
+        from app.generators.steps import step7_dxf_build as s7
+
+        captured = {}
+
+        async def fake_run_sw(func, drawing_path, properties, output_dir, task_id):
+            captured["drawing_path"] = drawing_path
+            captured["properties"] = properties
+            return {"slddrw_path": f"{output_dir}/drawing.slddrw",
+                    "dwg_path": f"{output_dir}/drawing.dwg",
+                    "pdf_path": f"{output_dir}/drawing.pdf",
+                    "final_snapshot_path": f"{output_dir}/final_snapshot.png",
+                    "properties_applied": list(properties), "warnings": []}
+
+        monkeypatch.setattr(s7, "run_sw", fake_run_sw)
         geometry = {
             "bom": [{"level": 0, "name": "底架焊合",
                      "path": "C:/asm/LB26.11000.SLDASM", "quantity": 1,
                      "is_suppressed": False}],
             "materials": {"Q235": 14, "Q355": 61, "45": 2},
-            "total_mass": 0.0,
         }
         ctx = _ctx(tmp_path, 7, StepName.DXF_BUILD,
-                   previous={2: geometry, 3: _views_for_dxf("1:50")})
+                   previous={2: geometry, 3: _views_for_drawing("1:50")})
         result = await DxfBuildExecutor()(ctx)
-        assert result["dxf_structure"]["header"]["sheet_size"] == "A0"
-
-        doc = ezdxf.readfile(tmp_path / "output" / "drawing.dxf")
-        texts = [e.dxf.text for e in doc.modelspace() if e.dxftype() == "TEXT"]
-        assert any("比例: 1:50" in t for t in texts)
-        assert any("材料: 见明细表" in t for t in texts)
-        assert not any("材料: 14" in t for t in texts)
-        # 图框使用 A0 尺寸
-        frame_lines = [e for e in doc.modelspace()
-                       if e.dxftype() == "LINE" and e.dxf.layer == "图框"]
-        max_x = max(max(e.dxf.start.x, e.dxf.end.x) for e in frame_lines)
-        assert max_x == pytest.approx(1189.0 - 10.0)
-
-    @pytest.mark.asyncio
-    async def test_single_material_filled_directly(self, tmp_path):
-        """唯一材料（{件名:材料} 形态）→ 材料栏直接填"""
-        geometry = {"bom": [], "materials": {"P1": "Q235"}, "total_mass": 0.0}
-        ctx = _ctx(tmp_path, 7, StepName.DXF_BUILD,
-                   previous={2: geometry, 3: _views_for_dxf()})
-        await DxfBuildExecutor()(ctx)
-        doc = ezdxf.readfile(tmp_path / "output" / "drawing.dxf")
-        texts = [e.dxf.text for e in doc.modelspace() if e.dxftype() == "TEXT"]
-        assert any("材料: Q235" in t for t in texts)
+        # 旧 step3 drawing_path 直接透传给 COM 收尾层
+        assert captured["drawing_path"] == "C:/fake/step3/drawing.slddrw"
+        props = captured["properties"]
+        assert props["Scale"] == "1:50"
+        assert props["Material"] == "见明细表"
+        assert "14" not in props["Material"]
+        assert props["Number"] == "LB26.11000"
+        assert props["Description"] == "底架焊合"
+        assert result["slddrw_path"].endswith("drawing.slddrw")
+        assert result["dwg_path"].endswith("drawing.dwg")
+        assert result["pdf_path"].endswith("drawing.pdf")
 
     @pytest.mark.asyncio
-    async def test_dimension_local_plus_view_offset(self, tmp_path):
-        """标注落图坐标 = 视图局部 × scale + 视图图幅偏移（抽样断言）"""
-        dims = {"dimensions": [{
-            "id": "dim_x", "type": "linear", "value": 1000.0, "unit": "mm",
-            "tolerance": {},
-            "position": {"x1": 0.0, "y1": -200.0, "x2": 1000.0, "y2": -200.0},
-            "associated_entities": [], "is_automatic": True,
-            "confidence": 1.0, "view_name": "front",
-        }]}
+    async def test_single_material_and_weight(self, tmp_path, monkeypatch):
+        """唯一材料（{件名:材料} 形态）→ 材料栏直填；重量=mass×数量求和 kg"""
+        from app.generators.steps import step7_dxf_build as s7
+
+        captured = {}
+
+        async def fake_run_sw(func, drawing_path, properties, output_dir, task_id):
+            captured["properties"] = properties
+            return {"slddrw_path": "a", "dwg_path": "b", "pdf_path": "c",
+                    "final_snapshot_path": "d", "properties_applied": [],
+                    "warnings": []}
+
+        monkeypatch.setattr(s7, "run_sw", fake_run_sw)
+        geometry = {
+            "bom": [{"level": 1, "name": "板", "path": "C:/p/P1.SLDPRT",
+                     "quantity": 2, "is_suppressed": False, "mass": 1.5},
+                    {"level": 1, "name": "轴", "path": "C:/p/P2.SLDPRT",
+                     "quantity": 1, "is_suppressed": False, "mass": 0.25}],
+            "materials": {"P1": "Q235"},
+        }
         ctx = _ctx(tmp_path, 7, StepName.DXF_BUILD,
-                   previous={3: _views_for_dxf("1:50"), 4: dims})
+                   previous={2: geometry, 3: _views_for_drawing()})
         await DxfBuildExecutor()(ctx)
-        doc = ezdxf.readfile(tmp_path / "output" / "drawing.dxf")
-        dim_lines = [e for e in doc.modelspace()
-                     if e.dxftype() == "LINE" and e.dxf.layer == "标注"]
-        # 标注线：局部 (0,-200)→(1000,-200)，scale=0.02，偏移 (20,700)
-        # → 图纸 (20,696) → (40,696)
-        found = any(
-            abs(e.dxf.start.x - 20.0) < 1e-6 and abs(e.dxf.start.y - 696.0) < 1e-6
-            and abs(e.dxf.end.x - 40.0) < 1e-6 and abs(e.dxf.end.y - 696.0) < 1e-6
-            for e in dim_lines)
-        assert found, "标注坐标 ≠ 局部×scale + 视图偏移"
+        assert captured["properties"]["Material"] == "Q235"
+        assert captured["properties"]["Weight"] == "3.250"  # 1.5×2 + 0.25
 
     @pytest.mark.asyncio
-    async def test_bom_column_widths_consumed(self, tmp_path):
-        """BOM 落图消费 style.column_widths（归一化到表宽），不再均分压穿"""
-        bom = {"bom_table": {
-            "columns": ["序号", "图号"],
-            "rows": [[1, "LB26.11000"]],
-            "position": {"x": 100.0, "y": 50.0, "width": 200.0, "height": 35.0},
-            "style": {"header_height": 20.0, "row_height": 15.0,
-                      "font_size": 3.5, "column_widths": [1.0, 3.0]},
-        }}
-        ctx = _ctx(tmp_path, 7, StepName.DXF_BUILD,
-                   previous={3: _views_for_dxf(), 5: bom})
-        await DxfBuildExecutor()(ctx)
-        doc = ezdxf.readfile(tmp_path / "output" / "drawing.dxf")
-        texts = {e.dxf.text: e for e in doc.modelspace()
-                 if e.dxftype() == "TEXT" and e.dxf.layer == "BOM"}
-        # 图号列表头 x = 100 + 200×(1/4) + 1 = 151
-        assert texts["图号"].dxf.insert.x == pytest.approx(151.0)
+    async def test_missing_drawing_path_raises(self, tmp_path):
+        """缺 Step3 drawing_path（旧 DXF 契约检查点）→ SWException 上抛"""
+        from app.core.exceptions import SWException
+        bad_step3 = _views_for_drawing()
+        del bad_step3["drawing_path"]
+        ctx = _ctx(tmp_path, 7, StepName.DXF_BUILD, previous={3: bad_step3})
+        with pytest.raises(SWException):
+            await DxfBuildExecutor()(ctx)
