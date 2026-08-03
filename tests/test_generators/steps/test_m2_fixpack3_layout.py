@@ -12,7 +12,16 @@ from pathlib import Path
 import pytest
 
 from app.generators.models import StepContext
-from app.generators.steps.step3_view_project import _build_layout
+from app.generators.steps.step3_view_project import (
+    _compute_layout_with_retry,
+    _select_sheet_by_content,
+)
+from app.generators.type_recognition import PartType
+from app.generators.view_strategy import (
+    get_view_strategy,
+    SHEET_A3_WIDTH,
+    SHEET_A3_HEIGHT,
+)
 from app.generators.steps.step5_bom_generate import BomGenerateExecutor
 from app.generators.steps.step7_dxf_build import DxfBuildExecutor
 from app.models.generation import StepName
@@ -50,29 +59,40 @@ def _ctx(tmp_path: Path, step: int, step_name, previous=None, parameters=None):
 
 
 # ----------------------------------------------------------------------
-# Step3：第一角布局 + 图幅选型
+# Step3：第一角布局 + 图幅选型（B-M1：主视=最宽投影视图，居中偏上；
+#        侧视在主视右侧；俯视主视正下方；轴测左下角）
 # ----------------------------------------------------------------------
+
+def _layout_flow(sizes: dict, bom_rows: int = 0):
+    """模拟生产链路：A3 比例初算 → 图幅选型 → 升级后按最终图幅重算比例"""
+    strategy = get_view_strategy(PartType.BEAM)
+    positions, den, _ = _compute_layout_with_retry(
+        sizes, SHEET_A3_WIDTH, SHEET_A3_HEIGHT, strategy, "t")
+    sheet, w, h = _select_sheet_by_content(sizes, den, bom_rows, "t")
+    if (w, h) != (SHEET_A3_WIDTH, SHEET_A3_HEIGHT):
+        positions, den, _ = _compute_layout_with_retry(
+            sizes, w, h, strategy, "t")
+    return sheet, den, positions
+
 
 class TestFirstAngleLayout:
     def test_real_case_layout_a0(self):
-        """真机尺寸（LB26：主1002x327/俯1002x6959.5/左6924x327，BOM 43 行）
-        → 图幅 A0、比例按最终图幅重算=1:10（2026-08-01 老板验收修复：
-        原“A3 基准比例 1:50 放到 A0”导致视图缩成左上角一小簇）、
-        第一角相对位置、全部落在有效区内"""
-        views = [_view("front", 1002.0, 327.0),
-                 _view("top", 1002.0, 6959.5009),
-                 _view("left", 6924.0, 327.0)]
-        layout = _build_layout(views, "t", bom_rows=43)
+        """真机尺寸（LB26：端视1002x327/俯视1002x6959.5/侧视6924x327，BOM 43 行）
+        → 图幅 A0、比例按最终图幅重算=1:10、主视=长梁侧视（最宽者）居中、
+        端视在主视右侧、俯视在主视正下方、全部落有效区不重叠"""
+        sizes = {"front": (1002.0, 327.0),
+                 "top": (1002.0, 6959.5009),
+                 "left": (6924.0, 327.0)}
+        sheet, den, pos = _layout_flow(sizes, bom_rows=43)
 
-        assert views[0]["scale"] == "1:10"
-        assert layout["sheet_size"] == "A0"
-        pos = layout["view_positions"]
-        f, t, l = pos["front"], pos["top"], pos["left"]
-        # 第一角：俯视在主视正下方（x 对齐），左视在主视正右方
-        assert t["x"] == pytest.approx(f["x"])
-        assert t["y"] + t["height"] < f["y"]
-        assert l["x"] >= f["x"] + f["width"]
-        assert l["y"] + l["height"] == pytest.approx(f["y"] + f["height"])
+        assert sheet == "A0"
+        assert den == 10.0
+        # 主视 = 最宽者（left 长梁侧视）
+        main, side, top = pos["left"], pos["front"], pos["top"]
+        # 俯视在主视正下方（x 对齐），端视在主视正右方
+        assert top["x"] == pytest.approx(main["x"])
+        assert top["y"] + top["height"] < main["y"]
+        assert side["x"] >= main["x"] + main["width"]
         # 全部落在 A0 有效区（边距 20）且不重叠
         rects = []
         for p in pos.values():
@@ -88,22 +108,21 @@ class TestFirstAngleLayout:
                 assert not overlap, f"视图 {i}/{j} 重叠"
 
     def test_small_part_stays_a3(self):
-        """小件无 BOM → A3，第一角布局"""
-        views = [_view("front", 10.0, 30.0),
-                 _view("top", 10.0, 20.0),
-                 _view("left", 20.0, 30.0)]
-        layout = _build_layout(views, "t")
-        assert views[0]["scale"] == "1:1"
-        assert layout["sheet_size"] == "A3"
-        pos = layout["view_positions"]
-        assert pos["top"]["y"] + pos["top"]["height"] < pos["front"]["y"]
-        assert pos["left"]["x"] > pos["front"]["x"]
+        """小件无 BOM → A3，1:1，主视=最宽者"""
+        sizes = {"front": (10.0, 30.0),
+                 "top": (10.0, 20.0),
+                 "left": (20.0, 30.0)}
+        sheet, den, pos = _layout_flow(sizes)
+        assert den == 1.0
+        assert sheet == "A3"
+        main, side, top = pos["left"], pos["front"], pos["top"]
+        assert top["y"] + top["height"] < main["y"]
+        assert side["x"] > main["x"]
 
     def test_bom_estimate_forces_bigger_sheet(self):
         """视图装得下 A3 但 BOM 43 行装不下 → 升级到能装下 BOM 的图幅"""
-        views = [_view("front", 100.0, 50.0)]
-        layout = _build_layout(views, "t", bom_rows=43)
-        assert layout["sheet_size"] in ("A1", "A0")  # A2 高 410 也装不下 665+50
+        sheet, den, pos = _layout_flow({"front": (100.0, 50.0)}, bom_rows=43)
+        assert sheet == "A0"  # A1 高 594 也装不下 665+50
 
 
 # ----------------------------------------------------------------------
@@ -200,14 +219,17 @@ class TestTitleBlockAndFinalize:
 
         captured = {}
 
-        async def fake_run_sw(func, drawing_path, properties, output_dir, task_id):
+        async def fake_run_sw(func, drawing_path, properties, model_path,
+                              output_dir, task_id):
             captured["drawing_path"] = drawing_path
             captured["properties"] = properties
+            captured["model_path"] = model_path
             return {"slddrw_path": f"{output_dir}/drawing.slddrw",
                     "dwg_path": f"{output_dir}/drawing.dwg",
                     "pdf_path": f"{output_dir}/drawing.pdf",
                     "final_snapshot_path": f"{output_dir}/final_snapshot.png",
-                    "properties_applied": list(properties), "warnings": []}
+                    "properties_applied": list(properties),
+                    "properties_readback": {}, "warnings": []}
 
         monkeypatch.setattr(s7, "run_sw", fake_run_sw)
         geometry = {
@@ -222,11 +244,13 @@ class TestTitleBlockAndFinalize:
         # 旧 step3 drawing_path 直接透传给 COM 收尾层
         assert captured["drawing_path"] == "C:/fake/step3/drawing.slddrw"
         props = captured["properties"]
-        assert props["Scale"] == "1:50"
-        assert props["Material"] == "见明细表"
-        assert "14" not in props["Material"]
-        assert props["Number"] == "LB26.11000"
-        assert props["Description"] == "底架焊合"
+        assert props["比例"] == "1:50"
+        assert props["材料"] == "见明细表"
+        assert "14" not in props["材料"]
+        assert props["代号"] == "LB26.11000"
+        assert props["名称"] == "底架焊合"
+        # 缺陷3：模型路径回退自 Step2 顶层 BOM path
+        assert captured["model_path"] == "C:/asm/LB26.11000.SLDASM"
         assert result["slddrw_path"].endswith("drawing.slddrw")
         assert result["dwg_path"].endswith("drawing.dwg")
         assert result["pdf_path"].endswith("drawing.pdf")
@@ -238,11 +262,12 @@ class TestTitleBlockAndFinalize:
 
         captured = {}
 
-        async def fake_run_sw(func, drawing_path, properties, output_dir, task_id):
+        async def fake_run_sw(func, drawing_path, properties, model_path,
+                              output_dir, task_id):
             captured["properties"] = properties
             return {"slddrw_path": "a", "dwg_path": "b", "pdf_path": "c",
                     "final_snapshot_path": "d", "properties_applied": [],
-                    "warnings": []}
+                    "properties_readback": {}, "warnings": []}
 
         monkeypatch.setattr(s7, "run_sw", fake_run_sw)
         geometry = {
@@ -255,8 +280,8 @@ class TestTitleBlockAndFinalize:
         ctx = _ctx(tmp_path, 7, StepName.DXF_BUILD,
                    previous={2: geometry, 3: _views_for_drawing()})
         await DxfBuildExecutor()(ctx)
-        assert captured["properties"]["Material"] == "Q235"
-        assert captured["properties"]["Weight"] == "3.250"  # 1.5×2 + 0.25
+        assert captured["properties"]["材料"] == "Q235"
+        assert captured["properties"]["质量"] == "3.250"  # 1.5×2 + 0.25
 
     @pytest.mark.asyncio
     async def test_missing_drawing_path_raises(self, tmp_path):

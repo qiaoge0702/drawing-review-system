@@ -88,10 +88,12 @@ def _make_ctx(tmp_path: Path, previous: dict) -> StepContext:
 
 
 def _patch_run_sw(monkeypatch, captured: dict, warnings=None):
-    async def fake_run_sw(func, drawing_path, properties, output_dir, task_id):
+    async def fake_run_sw(func, drawing_path, properties, model_path,
+                          output_dir, task_id):
         captured["func"] = func.__name__
         captured["drawing_path"] = drawing_path
         captured["properties"] = dict(properties)
+        captured["model_path"] = model_path
         captured["output_dir"] = output_dir
         return {
             "slddrw_path": str(Path(output_dir) / "drawing.slddrw"),
@@ -99,6 +101,7 @@ def _patch_run_sw(monkeypatch, captured: dict, warnings=None):
             "pdf_path": str(Path(output_dir) / "drawing.pdf"),
             "final_snapshot_path": str(Path(output_dir) / "final_snapshot.png"),
             "properties_applied": [k for k, v in properties.items() if v],
+            "properties_readback": {k: v for k, v in properties.items() if v},
             "warnings": list(warnings or []),
         }
     monkeypatch.setattr(step7_dxf_build, "run_sw", fake_run_sw)
@@ -111,11 +114,21 @@ def _patch_run_sw(monkeypatch, captured: dict, warnings=None):
 class TestTitleBlockInfo:
     def test_full_info(self):
         info = title_block_info(_geometry(), _views_result("1:10"), [])
-        assert info["drawing_number"] == "LB26.00000拉臂总成"
+        # 缺陷3：代号/名称按模板 $PRPSHEET:{代号}/{名称} 语义拆分
+        assert info["drawing_number"] == "LB26.00000"
         assert info["name"] == "拉臂总成"
         assert info["material"] == "45"
         assert info["weight"] == "5.000"  # 3.5×1 + 0.75×2
         assert info["scale"] == "1:10"
+
+    def test_assembly_without_material_see_bom(self):
+        """装配体且材料未提取 → 材料按惯例填'见明细表' + 如实 warning"""
+        g = _geometry()
+        g["materials"] = {}
+        warnings = []
+        info = title_block_info(g, _views_result(), warnings)
+        assert info["material"] == "见明细表"
+        assert any("见明细表" in w for w in warnings)
 
     def test_multi_material_see_bom(self):
         g = _geometry()
@@ -158,12 +171,14 @@ class TestDxfBuildExecutor:
         assert captured["func"] == "finalize_drawing_sync"
         assert captured["drawing_path"] == \
             "C:/fake/task/step_3/output/drawing.slddrw"
+        # 缺陷3：模型级中文属性名 + 模型路径透传
         props = captured["properties"]
-        assert props["Number"] == "LB26.00000拉臂总成"
-        assert props["Description"] == "拉臂总成"
-        assert props["Material"] == "45"
-        assert props["Weight"] == "5.000"
-        assert props["Scale"] == "1:10"
+        assert props["代号"] == "LB26.00000"
+        assert props["名称"] == "拉臂总成"
+        assert props["材料"] == "45"
+        assert props["质量"] == "5.000"
+        assert props["比例"] == "1:10"
+        assert captured["model_path"] == "C:/asm/LB26.00000拉臂总成.SLDASM"
 
         # 输出契约：新增四份产物路径 + title_block
         out = tmp_path / "output"
@@ -181,7 +196,7 @@ class TestDxfBuildExecutor:
         _patch_run_sw(monkeypatch, captured)
         ctx = _make_ctx(tmp_path, {3: _views_result()})
         result = await DxfBuildExecutor()(ctx)
-        assert captured["properties"]["Number"] == ""
+        assert captured["properties"]["代号"] == ""
         assert result["title_block"]["drawing_number"] == ""
         assert result.get("warnings")
 

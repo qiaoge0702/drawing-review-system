@@ -37,7 +37,7 @@ class TestUnsupportedViews:
     async def test_unsupported_view_raises_gen_unsupported_feature(self, tmp_path):
         src = tmp_path / "part.sldprt"
         src.write_text("dummy")
-        ctx = _make_ctx(tmp_path, src, views=["front", "isometric"])
+        ctx = _make_ctx(tmp_path, src, views=["front", "iso"])
 
         with pytest.raises(SWException) as exc_info:
             await ViewProjectExecutor()(ctx)

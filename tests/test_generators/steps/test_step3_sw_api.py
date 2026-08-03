@@ -267,34 +267,84 @@ class _ExtWithCpm:
         return self._drw.cpm
 
 
+class FakeMassProp:
+    def __init__(self, mass):
+        self.Mass = mass
+
+
+class _ModelExt:
+    """模型侧 Extension：CustomPropertyManager + CreateMassProperty"""
+    def __init__(self, model):
+        self._m = model
+
+    def CustomPropertyManager(self, config):
+        return self._m.cpm
+
+    def CreateMassProperty(self):
+        return self._m.mass_prop
+
+
+class FakeModel:
+    def __init__(self, mass=0.0):
+        self.cpm = FakeCpm()
+        self.mass_prop = FakeMassProp(mass)
+        self.Extension = _ModelExt(self)
+
+
 class TestFinalizeDrawingSync:
-    def _app(self, tmp_path):
+    def _app(self, tmp_path, model_mass=0.0):
         drw = FakeFinalizeDrawing()
         drw.Extension = _ExtWithCpm(drw)
+        model = FakeModel(mass=model_mass)
 
         class App(FakeSwApp):
             def OpenDoc6(self_, path, doc_type, opts, cfg, errors, warnings):
-                assert doc_type == 3  # 工程图
                 assert opts & 1  # Silent 必带
                 assert not (opts & 2)  # 可写（要改自定义属性）
-                return drw
+                if str(path).lower().endswith(".slddrw"):
+                    assert doc_type == 3  # 工程图
+                    return drw
+                return model  # 模型（$PRPSHEET 数据源）
 
-        return App(drw=drw), drw
+        return App(drw=drw), drw, model
 
     def test_happy_path(self, tmp_path):
-        app, drw = self._app(tmp_path)
-        props = {"Number": "LB26.00000", "Description": "拉臂总成",
-                 "Material": "见明细表", "Weight": "12.500", "Scale": "1:10",
+        app, drw, model = self._app(tmp_path)
+        # 缺陷3：中文属性名写模型级（$PRPSHEET 数据源），空值跳过
+        props = {"代号": "LB26.00000", "名称": "拉臂总成",
+                 "材料": "见明细表", "重量": "12.500", "比例": "1:10",
                  "Empty": ""}
         r = sw_drawing.finalize_drawing_sync(
-            "C:/fake/step3/drawing.slddrw", props, str(tmp_path),
+            "C:/fake/step3/drawing.slddrw", props,
+            "C:/fake/LB26.00000拉臂总成.SLDASM", str(tmp_path),
             task_id="t7", sw_app=app)
-        # 空值属性跳过不写（诚实留空）
-        assert drw.cpm.props == {"Number": "LB26.00000",
-                                 "Description": "拉臂总成",
-                                 "Material": "见明细表",
-                                 "Weight": "12.500", "Scale": "1:10"}
-        assert set(r["properties_applied"]) == set(drw.cpm.props)
+        # 属性写到模型级，不是图纸级
+        assert model.cpm.props == {"代号": "LB26.00000",
+                                   "名称": "拉臂总成",
+                                   "材料": "见明细表",
+                                   "重量": "12.500", "比例": "1:10"}
+        assert drw.cpm.props == {}
+        assert set(r["properties_applied"]) == set(model.cpm.props)
+
+    def test_weight_fallback_to_model_mass(self, tmp_path):
+        """调用方重量留空 → 从模型 MassProperty 实测（kg）回填"""
+        app, drw, model = self._app(tmp_path, model_mass=11763.8091)
+        props = {"代号": "LB26.00000", "名称": "拉臂总成"}
+        r = sw_drawing.finalize_drawing_sync(
+            "C:/fake/step3/drawing.slddrw", props,
+            "C:/fake/model.SLDASM", str(tmp_path), sw_app=app)
+        assert model.cpm.props["质量"] == "11763.809"
+        assert "质量" in r["properties_applied"]
+
+    def test_no_model_path_warns(self, tmp_path):
+        """缺模型路径 → 跳过模型属性写入 + 如实 warning，不阻断导出"""
+        app, drw, model = self._app(tmp_path)
+        r = sw_drawing.finalize_drawing_sync(
+            "C:/fake/step3/drawing.slddrw", {"代号": "LB26.00000"},
+            "", str(tmp_path), sw_app=app)
+        assert r["properties_applied"] == []
+        assert any("模型路径" in w for w in r["warnings"])
+        assert Path(r["slddrw_path"]).exists()
         # 四份产物全部另存
         assert r["slddrw_path"] == str(tmp_path / "drawing.slddrw")
         assert r["dwg_path"] == str(tmp_path / "drawing.dwg")
@@ -308,7 +358,8 @@ class TestFinalizeDrawingSync:
         app = FakeSwApp(open_ok=False)
         with pytest.raises(SWException) as exc_info:
             sw_drawing.finalize_drawing_sync(
-                "C:/fake/x.slddrw", {}, str(tmp_path), sw_app=app)
+                "C:/fake/x.slddrw", {}, "C:/fake/m.SLDASM",
+                str(tmp_path), sw_app=app)
         assert exc_info.value.error_code == ErrorCode.GEN_SW_NOT_AVAILABLE
 
 
@@ -346,7 +397,7 @@ class TestExecutorWiring:
     async def test_views_json_contract(self, tmp_path, monkeypatch):
         """monkeypatch run_sw → executor 组装 views.json 契约（只加不改）"""
         async def fake_run_sw(func, source_file, view_names, output_dir,
-                              bom_rows, task_id):
+                              bom_rows, task_id, sw_app=None, use_b_m1=True):
             return _fake_sw_result(Path(output_dir))
 
         monkeypatch.setattr(step3_view_project, "run_sw", fake_run_sw)

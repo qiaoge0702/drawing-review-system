@@ -1,19 +1,13 @@
 # 02-sw_com单线程执行器
 
-**位置**: `app/generators/sw_com.py` (~60行)  
-**方案B命运**: 原样复用
+**位置**: `app/generators/sw_com.py` (~60行)
 
----
-
-## 职责
-
+## 2.1 职责
 解决两个骨架审查阻断问题：
 - **B2**: 同步COM调用直接跑在async函数里会阻塞事件循环
 - **B3**: COM线程亲和性（pythoncom要求每个线程独立CoInitialize）
 
----
-
-## 关键接口
+## 2.2 关键接口与契约
 
 ```python
 async def run_sw(func: Callable[..., T], *args, **kwargs) -> T
@@ -29,9 +23,7 @@ _sw_executor = ThreadPoolExecutor(
 )
 ```
 
----
-
-## COM纪律（铁律）
+## 2.3 纪律与红线（COM铁律）
 
 | 纪律 | 说明 |
 |------|------|
@@ -40,19 +32,8 @@ _sw_executor = ThreadPoolExecutor(
 | Silent必带 | OpenDoc6必带options=1（Silent），抑制模态弹窗防挂死 |
 | 禁杀进程 | 严禁强杀SW进程；文档用完 `CloseAllDocuments(True)` |
 
----
-
-## 使用示例
-
-```python
-from app.generators.sw_com import run_sw
-
-# 所有SW COM调用必须经此执行器排队
-result = await run_sw(_load_sw_file_sync, source_file, output_dir)
-```
-
----
-
-## 测试位置
-
+## 2.4 测试位置
 - `tests/unit/test_sw_com.py`（如存在）验证超时行为
+
+## 2.5 方案B命运
+**原样复用**。所有SW COM调用必须经此执行器排队。

@@ -4,11 +4,7 @@
 - API: `app/routers/generate.py` (~160行)
 - Service: `app/services/generation_service.py` (~200行)
 
-**方案B命运**: 原样复用
-
----
-
-## API端点（冻结：只加不改）
+## 6.1 API端点（冻结：只加不改）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -19,9 +15,7 @@
 | POST | `/api/generate/{task_id}/rerun` | 从指定步骤重跑 |
 | GET | `/api/generate/{task_id}/artifacts/{step}/{filename}` | 下载产物 |
 
----
-
-## TaskResult契约（向后兼容）
+## 6.2 TaskResult契约（向后兼容）
 
 ```python
 {
@@ -34,9 +28,7 @@
 }
 ```
 
----
-
-## 产物安全（纵深防御）
+## 6.3 产物安全（纵深防御）
 
 ```python
 file_path = Path(artifact.path).resolve()
@@ -45,9 +37,7 @@ if not file_path.is_relative_to(step_dir):
     raise HTTPException(status_code=403, detail="非法产物路径")
 ```
 
----
-
-## generation_service核心方法
+## 6.4 generation_service核心方法
 
 | 方法 | 说明 |
 |------|------|
@@ -56,9 +46,7 @@ if not file_path.is_relative_to(step_dir):
 | `get_task(task_id)` | 内存优先，磁盘result.json回退 |
 | `get_step_snapshot_path(task_id, step)` | 按候选路径探测preview.png |
 
----
-
-## 并发约束
+## 6.5 并发约束
 
 ```python
 # 全局串行执行（SW COM单线程限制）
@@ -66,19 +54,18 @@ _queue: asyncio.Queue  # 任务队列
 _worker_task: asyncio.Task  # 单工作器
 ```
 
----
-
-## WS进度推送
+## 6.6 WS进度推送
 
 ```python
 _notify: Callable[[str, Dict], Awaitable[None]]  # 由main.py注入
 # 消息类型: {"type": "step_start"|"step"|"finished", ...}
 ```
 
----
-
-## 纪律与红线
+## 6.7 纪律与红线
 
 - **契约冻结**: 不修改现有字段语义，不删除端点
 - **向后兼容**: 新增字段默认None/有默认值，旧客户端无感
 - **task_id校验**: 磁盘回退前校验格式 `[a-zA-Z0-9_-]{1,64}`，防路径逃逸
+
+## 6.8 方案B命运
+**原样复用**。端点与模型保持稳定，Step3/7产物路径约定不变。
