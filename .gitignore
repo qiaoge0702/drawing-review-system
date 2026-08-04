@@ -4,12 +4,14 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.env
 uploads/
 output/
 temp/
 .DS_Store
 *.log
 .workbuddy/
+.codex/
 
 # SolidWorks temp files
 ~$*
