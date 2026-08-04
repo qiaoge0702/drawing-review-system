@@ -125,6 +125,29 @@
         .final-links { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
         .final-dl { text-decoration: none; display: inline-block; }
 
+        /* 阶段产物页 */
+        .view-toggle { display: flex; gap: 8px; margin: 16px 0; }
+        .view-toggle .btn { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+        .view-toggle .btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+        .stage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+        .stage-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; background: var(--surface); }
+        .stage-card.status-running { border-color: var(--warning); }
+        .stage-card.status-completed { border-color: var(--success); }
+        .stage-card.status-error { border-color: var(--danger); }
+        .stage-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .stage-title { font-size: 15px; font-weight: 600; }
+        .stage-sub { font-size: 12px; color: var(--text-secondary); }
+        .stage-status { font-size: 13px; margin-bottom: 12px; }
+        .stage-body { font-size: 13px; }
+        .stage-empty { color: var(--text-light); text-align: center; padding: 24px 0; border: 1px dashed var(--border); border-radius: var(--radius-sm); background: #f8fafc; }
+        .stage-dl dt { color: var(--text-secondary); margin-top: 8px; }
+        .stage-dl dd { margin-left: 0; word-break: break-all; }
+        .view-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+        .view-item .snapshot-thumb { height: 140px; }
+        .view-caption { text-align: center; color: var(--text-secondary); font-size: 12px; margin-top: 4px; }
+        .stage-downloads { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+        .stage-report { max-height: 240px; }
+
         /* 大图灯箱 */
         .lightbox {
             position: fixed; inset: 0; background: rgba(15,23,42,0.85);
@@ -155,18 +178,6 @@
                 <div class="create-form">
                     <label>SW 文件路径（.SLDASM / .SLDPRT）</label>
                     <input id="source-file" type="text" placeholder="E:\path\to\model.SLDASM">
-                    <label>图纸类型</label>
-                    <select id="drawing-type">
-                        <option value="weldment">焊接件图</option>
-                        <option value="part">零件图</option>
-                        <option value="sub_assembly">部件装配图</option>
-                        <option value="total_assembly">总装配图</option>
-                    </select>
-                    <label>目标格式</label>
-                    <select id="target-format">
-                        <option value="dxf">DXF</option>
-                        <option value="dwg">DWG</option>
-                    </select>
                     <button id="btn-create" class="btn">创建任务</button>
                 </div>
             </div>

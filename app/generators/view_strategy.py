@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.generators.type_recognition import BoundingBox, PartType
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,30 @@ SW_PREDEFINED_VIEWS = {
     ViewName.RIGHT: ["*右视", "*Right"],
     ViewName.ISOMETRIC: ["*等轴测", "*Isometric"],
 }
+
+
+def _resolve_sw_predefined_views() -> Dict[ViewName, List[str]]:
+    """合并硬编码默认值与 settings.sw.predefined_view_names 可选配置。
+    配置项支持 Dict[str, str] 或字符串中的逗号分隔列表；缺省保持现有
+    中英文候选顺序。"""
+    cfg = get_settings().sw
+    cfg_names = getattr(cfg, "predefined_view_names", None) or {}
+    if not cfg_names:
+        return SW_PREDEFINED_VIEWS
+    merged: Dict[ViewName, List[str]] = {
+        k: list(v) for k, v in SW_PREDEFINED_VIEWS.items()
+    }
+    for key, val in cfg_names.items():
+        try:
+            vn = ViewName(key)
+        except ValueError:
+            logger.warning(f"忽略未知预定义视图名配置项: {key}")
+            continue
+        if not val:
+            continue
+        parts = [p.strip() for p in str(val).split(",") if p.strip()]
+        merged[vn] = parts + [p for p in merged[vn] if p not in parts]
+    return merged
 
 
 @dataclass
@@ -347,7 +372,7 @@ def get_sw_view_name(view_name: ViewName, attempt: int = 0) -> Optional[str]:
     Returns:
         SW视图名，或None（超过尝试次数）
     """
-    names = SW_PREDEFINED_VIEWS.get(view_name, [])
+    names = _resolve_sw_predefined_views().get(view_name, [])
     if attempt < len(names):
         return names[attempt]
     return None
@@ -384,13 +409,14 @@ def create_view_strategy_result(
         )
     
     # 组装结果
+    resolved_names = _resolve_sw_predefined_views()
     views_data = []
     for view in strategy.views:
         vw, vh = view_sizes.get(view.name, (100.0, 100.0))
         views_data.append({
             "name": view.name.value,
             "display_name": view.display_name,
-            "sw_names": view.sw_names,
+            "sw_names": resolved_names.get(view.name, view.sw_names),
             "size_mm": {"width": round(vw, 4), "height": round(vh, 4)},
             "position_hint": view.position_hint,
         })

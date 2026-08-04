@@ -18,6 +18,15 @@ const STEP_META = [
   { num: 8, name: '审查闭环' },
 ];
 
+/** 阶段产物页分组（显示顺序，非执行顺序） */
+const STAGE_GROUPS = [
+  { key: 'import', name: '导入', steps: [1, 2] },
+  { key: 'skeleton', name: '骨架', steps: [3, 7] },
+  { key: 'table', name: '表格', steps: [5, 6] },
+  { key: 'annotation', name: '标注', steps: [4] },
+  { key: 'review', name: '审查', steps: [8] },
+];
+
 const STATUS_LABEL = {
   pending: '等待',
   running: '运行',
@@ -83,7 +92,16 @@ export function renderMain(el) {
   }
 
   if (activeStep === 0) {
-    el.innerHTML = renderOverview(task) + renderTimeline(task) + renderFinalCard(task);
+    const mainView = store.get('mainView') || 'stage';
+    const toggle = `
+      <div class="view-toggle">
+        <button class="btn btn-sm ${mainView === 'stage' ? 'active' : ''}" data-view="stage">阶段产物</button>
+        <button class="btn btn-sm ${mainView === 'timeline' ? 'active' : ''}" data-view="timeline">步骤回放</button>
+      </div>`;
+    const body = mainView === 'stage'
+      ? renderStage(task)
+      : renderTimeline(task) + renderFinalCard(task);
+    el.innerHTML = renderOverview(task) + toggle + body;
     return;
   }
 
@@ -126,6 +144,111 @@ function renderTimeline(task) {
   return `<h3 class="timeline-section-title">步骤回放</h3><div class="timeline">${cards}</div>`;
 }
 
+/** 阶段产物页：按阶段分组展示产物 */
+function renderStage(task) {
+  const steps = task.steps || [];
+  const byNum = Object.fromEntries(steps.map((s) => [s.step, s]));
+
+  const cards = STAGE_GROUPS.map((g) => {
+    const stageSteps = g.steps.map((n) => byNum[n]).filter(Boolean);
+    const status = deriveStageStatus(stageSteps, g.steps.length);
+    return `
+      <div class="stage-card status-${esc(status)}">
+        <div class="stage-head">
+          <span class="stage-title">${esc(g.name)}</span>
+          <span class="stage-sub">${g.steps.map((n) => `Step ${n}`).join(', ')}</span>
+        </div>
+        <div class="stage-status">${STATUS_ICON[status] || '○'} ${STATUS_LABEL[status] || status}</div>
+        <div class="stage-body">${renderStageBody(task, g, stageSteps, byNum)}</div>
+      </div>`;
+  }).join('');
+
+  return `<h3 class="timeline-section-title">阶段产物</h3><div class="stage-grid">${cards}</div>`;
+}
+
+function deriveStageStatus(stageSteps, expectedCount) {
+  if (stageSteps.some((s) => s.status === 'running')) return 'running';
+  if (stageSteps.some((s) => s.status === 'error')) return 'error';
+  if (stageSteps.length === expectedCount && stageSteps.every((s) => s.status === 'completed')) return 'completed';
+  if (stageSteps.some((s) => s.status === 'completed')) return 'running';
+  return 'pending';
+}
+
+function renderStageBody(task, group, stageSteps, byNum) {
+  switch (group.key) {
+    case 'import': return renderImportStage(task, stageSteps);
+    case 'skeleton': return renderSkeletonStage(task, group.steps, byNum);
+    case 'table': return '<div class="stage-empty">待 B-M2 填充</div>';
+    case 'annotation': return '<div class="stage-empty">待 B-M3 填充</div>';
+    case 'review': return renderReviewStage(task, stageSteps);
+    default: return '';
+  }
+}
+
+function renderImportStage(task, stageSteps) {
+  const stepMap = Object.fromEntries(stageSteps.map((s) => [s.step, s]));
+  const rows = [
+    { k: '源文件', v: task.source_file || '-' },
+    { k: 'Step 1 状态', v: statusText(stepMap[1]) },
+    { k: 'Step 2 状态', v: statusText(stepMap[2]) },
+  ];
+  const summary = stepMap[2]?.output_data?.geometry_summary;
+  if (summary) rows.push({ k: '几何解析摘要', v: JSON.stringify(summary) });
+  return `<dl class="stage-dl">${rows.map((r) => `<dt>${esc(r.k)}</dt><dd>${esc(r.v)}</dd>`).join('')}</dl>`;
+}
+
+function statusText(step) {
+  if (!step) return '等待';
+  return `${STATUS_ICON[step.status] || '○'} ${STATUS_LABEL[step.status] || step.status}`;
+}
+
+function renderSkeletonStage(task, stepNums, byNum) {
+  const snapshots = [];
+  for (const n of stepNums) {
+    const s = byNum[n];
+    if (!s) continue;
+    const url = s.snapshot_url || (s.snapshot_available ? api.snapshotUrl(task.task_id, n) : null);
+    if (url) snapshots.push({ step: n, url });
+  }
+  const media = snapshots.length
+    ? `<div class="view-grid">${snapshots.map((s) => `
+        <div class="view-item">
+          <img class="snapshot-thumb" loading="lazy" src="${s.url}" data-full="${s.url}" alt="Step ${s.step} 视图">
+          <div class="view-caption">Step ${s.step}</div>
+        </div>`).join('')}</div>`
+    : '<div class="stage-empty">暂无骨架视图快照</div>';
+
+  const SKELETON_EXTS = ['.slddrw', '.dwg', '.pdf', '.png'];
+  const links = [];
+  for (const n of stepNums) {
+    const s = byNum[n];
+    if (!s) continue;
+    for (const a of s.artifacts || []) {
+      const lower = (a.name || '').toLowerCase();
+      if (SKELETON_EXTS.some((ext) => lower.endsWith(ext))) {
+        links.push(`<a class="btn btn-sm final-dl" href="${api.artifactUrl(task.task_id, n, a.name)}" target="_blank">下载 ${esc(a.name)}</a>`);
+      }
+    }
+  }
+  const downloads = links.length
+    ? `<div class="stage-downloads">${links.join('')}</div>`
+    : '<div class="stage-empty">暂无 SLDDRW/DWG/PDF/PNG 产物</div>';
+
+  return media + downloads;
+}
+
+function renderReviewStage(task, stageSteps) {
+  const step = stageSteps[0];
+  if (!step) return '<div class="stage-empty">Step 8 尚未执行</div>';
+  const output = step.output_data
+    ? `<pre class="json-view stage-report">${esc(JSON.stringify(step.output_data, null, 2))}</pre>`
+    : '<div class="muted">暂无审查报告数据</div>';
+  return `
+    <div class="stage-status-line">状态: ${statusText(step)}</div>
+    ${step.error ? `<div class="error-text">${esc(step.error)}</div>` : ''}
+    ${output}`;
+}
+
 /** 终图卡片：任务完成后展示 SLDDRW/DWG/PDF 下载链接 + 终图快照 */
 function renderFinalCard(task) {
   if (task.status !== 'completed') return '';
@@ -164,8 +287,6 @@ function renderOverview(task) {
       <tr><td>源文件</td><td>${esc(task.source_file)}</td></tr>
       <tr><td>状态</td><td>${esc(task.status)}</td></tr>
       <tr><td>当前步骤</td><td>${task.current_step} / 8</td></tr>
-      <tr><td>图纸类型</td><td>${esc(task.config?.drawing_type)}</td></tr>
-      <tr><td>目标格式</td><td>${esc(task.config?.target_format)}</td></tr>
       ${task.error ? `<tr><td>错误</td><td class="error-text">${esc(task.error)}</td></tr>` : ''}
     </table>`;
 }

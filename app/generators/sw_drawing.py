@@ -156,6 +156,12 @@ def _layout_fill_ratio(positions: Dict[str, Any], sheet_w: float,
     return ((x1 - x0) * (y1 - y0)) / (sheet_w * sheet_h)
 
 
+def _rects_intersect(a: Dict[str, float], b: Dict[str, float]) -> bool:
+    return (a["x"] < b["x"] + b["width"] and b["x"] < a["x"] + a["width"]
+            and a["y"] < b["y"] + b["height"]
+            and b["y"] < a["y"] + a["height"])
+
+
 def _pick_scale_measured_impl(measured_sizes, den_cur, sheet_w, sheet_h,
                               task_id, warnings):
     """按实测视图尺寸（当前 1:den_cur 下的图纸 mm）从 GB 比例系列从大到小
@@ -295,20 +301,30 @@ def _first_angle_layout_b_m1(
             "height": round(sh, 4),
         }
     
-    # 轴测图左下角。轴测为斜置实体，包围盒（对角棒）与正投影视图相交属
-    # 常态（LB26 参考图轴测包围盒同样与俯视相交，实际线稿互不干涉）——
-    # 固定左下角，重叠由最终实测检查如实 warning
+    # 轴测图左下角；与俯视包围盒相交时改右下角，仍相交则降一档比例
     if "isometric" in scaled:
         iw, ih = scaled["isometric"]
-        iso_x = margin
-        iso_y = margin
-        
-        positions["isometric"] = {
-            "x": round(iso_x, 4),
-            "y": round(iso_y, 4),
-            "width": round(iw, 4),
-            "height": round(ih, 4),
-        }
+        for iso_x in (margin, sheet_w - margin - iw):
+            positions["isometric"] = {
+                "x": round(iso_x, 4), "y": round(margin, 4),
+                "width": round(iw, 4), "height": round(ih, 4),
+            }
+            if ("top" not in positions or
+                    not _rects_intersect(positions["isometric"], positions["top"])):
+                break
+        else:
+            iso_den = _next_scale_den(scale_den)
+            if iso_den == scale_den:
+                return None
+            factor = scale_den / iso_den
+            iw, ih = iw * factor, ih * factor
+            positions["isometric"] = {
+                "x": round(sheet_w - margin - iw, 4), "y": round(margin, 4),
+                "width": round(iw, 4), "height": round(ih, 4),
+            }
+            if ("top" in positions and
+                    _rects_intersect(positions["isometric"], positions["top"])):
+                return None
     
     # 校验所有视图在图幅内
     for name, pos in positions.items():
@@ -845,6 +861,8 @@ def create_drawing_sync(
         #     低于 70% 如实 warning）→ 重设比例 → 重排 → 重定位
         if inserted:
             import math
+            # 保留 5b 前有效布局：万一重排失败，禁止空 positions 跳过重定位
+            pre_positions = positions
             outlines0 = _measure_outlines(inserted, list(inserted.keys()), task_id)
             for name in list(inserted.keys()):
                 if name != "top":
@@ -899,9 +917,36 @@ def create_drawing_sync(
             positions = _first_angle_layout_b_m1(
                 measured_sizes, 1.0, sheet_w, sheet_h, LAYOUT_GAP_DEFAULT)
             if positions is None:
-                warnings.append(f"实测轮廓按 1:{den:g} 超出 {sheet} 布局能力，"
-                                f"视图可能重叠/出界（如实上报）")
-                positions = {}
+                # 逃生口修复：按 GB 比例序列继续往小比例降档重试
+                seq = list(GB_SCALE_RATIOS)
+                start = seq.index(den) if den in seq else 0
+                for try_den in seq[start + 1:]:
+                    for name, view in inserted.items():
+                        _set_view_scale(view, try_den, name, warnings)
+                    iso_try = _next_scale_den(try_den)
+                    if "isometric" in inserted and iso_try != try_den:
+                        _set_view_scale(inserted["isometric"], iso_try,
+                                        "isometric", warnings)
+                    drw.ForceRebuild3(True)
+                    outlines0 = _measure_outlines(inserted,
+                                                  list(inserted.keys()), task_id)
+                    measured_sizes = {
+                        n: ((o[2] - o[0]) * 1000.0, (o[3] - o[1]) * 1000.0)
+                        for n, o in outlines0.items()
+                    }
+                    positions = _first_angle_layout_b_m1(
+                        measured_sizes, 1.0, sheet_w, sheet_h,
+                        LAYOUT_GAP_DEFAULT)
+                    if positions is not None:
+                        den, iso_den = try_den, iso_try
+                        logger.info(f"[Task:{task_id}] measured layout "
+                                    f"fallback OK: 1:{den:g}")
+                        break
+                if positions is None:
+                    warnings.append(
+                        f"实测轮廓在最小比例 1:{GB_SCALE_RATIOS[-1]:g} 仍超出 "
+                        f"{sheet} 布局能力，保留最后一次有效布局（如实上报）")
+                    positions = pre_positions or {}
 
         # 6) 隐藏线可见
         for name, view in inserted.items():

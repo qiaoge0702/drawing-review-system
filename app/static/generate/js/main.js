@@ -29,12 +29,8 @@ async function createTask() {
     alert('请输入 SW 文件路径');
     return;
   }
-  const config = {
-    drawing_type: $('#drawing-type').value,
-    target_format: $('#target-format').value,
-  };
   try {
-    const { task_id } = await api.createTask(sourceFile, config);
+    const { task_id } = await api.createTask(sourceFile, {});
     await openTask(task_id);
   } catch (e) {
     alert(`创建任务失败: ${e.message}`);
@@ -42,7 +38,7 @@ async function createTask() {
 }
 
 async function openTask(taskId) {
-  store.set({ taskId, activeStep: 0, task: null });
+  store.set({ taskId, activeStep: 0, mainView: 'stage', task: null });
   try {
     const task = await api.getTask(taskId);
     store.set({ task });
@@ -90,6 +86,13 @@ function bindEvents() {
 
   // 总览按钮
   $('#btn-overview').addEventListener('click', () => store.set({ activeStep: 0 }));
+
+  // 主视图切换（阶段产物 / 步骤回放）
+  $('#main-content').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-view]');
+    if (!btn) return;
+    store.set({ mainView: btn.dataset.view });
+  });
 
   // 重跑按钮（事件委托）
   $('#main-content').addEventListener('click', (e) => {
