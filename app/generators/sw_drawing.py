@@ -573,68 +573,16 @@ def _save_as(drw: Any, path: str, warnings: List[str], label: str) -> None:
 
 
 def _save_as_png(drw: Any, path: str, warnings: List[str], label: str = "PNG snapshot") -> None:
-    """PNG 整图导出：优先按图纸页（Sheet）完整范围输出，而非当前视图/窗口裁剪。
+    """PNG 整图导出：先缩放到整张图纸页，再 SaveAs PNG，避免窗口/视图裁切。
 
-    真机缺陷：SW 中图纸完整，但 preview.png 被裁/缺区域，根因是 SaveAs PNG
-    默认按屏幕/视图区域导出。本函数尝试使用 ExportAsPNGOptions 指定纸张/图纸
-    范围；如 API 不可用或参数名有误，则回退到原有 _save_as，避免阻断流程。
-
-    SW API 存疑（需老板查官方文档确认）：
-    1. 获取选项对象：sw_app.GetExportFileData(swExportImageFileType_PNG?)
-       或 win32com.client.Dispatch("SldWorks.ExportAsPNGOptions")？
-    2. 整图范围参数名：ExportAsPNGOptions.OutputSize / ImageSize / PrintArea？
-       对应枚举值 swExportImageSize_SheetBounds / swExportImageSize_PrintAreaSheet？
-    3. 是否还需同时设 Width/Height/DPI？图纸范围与 DPI 是否互斥？
-    4. 若 ExportAsPNGOptions 无效，备选 API：ModelDoc2.PrintOut/PrintOut2
-       配合 PrintSpecification.PrintArea = swPrintAreaSheet。
+    根因：Extension.SaveAs PNG 默认导出当前视图可见区域，若图纸超出窗口
+    则会被裁切。导出前调用 `Extension.ViewZoomToSheet()` 让当前视图完整
+    显示整张图纸页，再 SaveAs 即可得到完整 PNG。
     """
-    tried_options = False
     try:
-        import pythoncom
-        import win32com.client
-
-        # 尝试拿到 SW Application 以创建导出选项（drw.Application 在 COM 中通常可用）
-        sw_app = getattr(drw, "Application", None)
-        if sw_app is None:
-            raise RuntimeError("无法获取 drw.Application，无法创建 ExportAsPNGOptions")
-
-        # 候选①：通过 Application.GetExportFileData 创建 PNG 选项对象
-        # swExportImageFileType_e 中 PNG 枚举值可能是 2 或 4，此处用 2 尝试；
-        # 失败则回退候选②直接 Dispatch。
-        export_data = None
-        try:
-            export_data = sw_app.GetExportFileData(2)
-        except Exception:
-            export_data = win32com.client.Dispatch("SldWorks.ExportAsPNGOptions")
-
-        if export_data is not None:
-            # 候选整图范围参数：OutputSize / ImageSize / PrintArea（不确定正确名）
-            # 优先尝试 OutputSize = 1（假设 SheetBounds 枚举值为 1），失败静默忽略
-            for prop_name in ("OutputSize", "ImageSize", "PrintArea"):
-                try:
-                    setattr(export_data, prop_name, 1)
-                    break
-                except Exception:
-                    continue
-            else:
-                warnings.append(
-                    "PNG 整图导出：未能设置图纸范围参数（OutputSize/ImageSize/PrintArea），"
-                    "请老板确认 ExportAsPNGOptions 正确成员名/枚举值")
-
-            errors = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-            warns = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-            ok = drw.Extension.SaveAs(path, 0, _SAVEAS_SILENT, export_data,
-                                      errors, warns)
-            if ok:
-                return
-            tried_options = True
+        drw.Extension.ViewZoomToSheet()
     except Exception as e:
-        logger.debug(f"PNG 整图导出尝试失败 ({e})，回退到通用 SaveAs")
-
-    if tried_options:
-        warnings.append(
-            "PNG 整图导出：ExportAsPNGOptions 调用未返回成功，回退到通用 SaveAs；"
-            "真机请确认 SheetBounds 参数是否正确")
+        logger.debug(f"ViewZoomToSheet 失败 ({e})，继续 SaveAs PNG")
     _save_as(drw, path, warnings, label)
 
 
