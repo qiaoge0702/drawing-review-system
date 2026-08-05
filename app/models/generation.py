@@ -112,7 +112,29 @@ class TaskConfig(BaseModel):
     include_bom: bool = Field(default=True)
     include_tech_requirements: bool = Field(default=True)
     tolerance_level: Literal["rough", "normal", "precise"] = Field(default="normal")
-    
+
+    # B-M1+ 用户覆盖字段（设计文档 §3.x：GenerateRequest 透传至 Step3 策略）
+    part_type_override: Optional[str] = Field(
+        default=None,
+        description="零件类型强制覆盖（standard_part/beam/plate/weldment/assembly）"
+    )
+    views_override: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="视图列表覆盖：按 id 匹配 → 字段级 patch / 新增 id 追加 / 显式 remove 删除"
+    )
+    layout_mode: Optional[Literal["auto", "manual"]] = Field(
+        default=None,
+        description="全局布局策略：auto=约束布局自动填充，manual=用户辅助指定位置"
+    )
+    positions_override: Optional[Dict[str, List[float]]] = Field(
+        default=None,
+        description="绝对定位覆盖：{视图id: [x, y]}（图纸 mm），绕过约束布局"
+    )
+    projection_type_override: Optional[Literal["first_angle", "third_angle"]] = Field(
+        default=None,
+        description="投影类型覆盖：first_angle=GB第一角（默认），third_angle=第三角"
+    )
+
     @field_validator("views")
     @classmethod
     def validate_views(cls, v: List[str]) -> List[str]:
@@ -120,6 +142,35 @@ class TaskConfig(BaseModel):
         for view in v:
             if view not in allowed:
                 raise ValueError(f"不支持的视图类型: {view}，允许: {allowed}")
+        return v
+
+    @field_validator("part_type_override")
+    @classmethod
+    def validate_part_type_override(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        allowed = {"standard_part", "beam", "plate", "weldment", "assembly"}
+        if v not in allowed:
+            raise ValueError(f"不支持的零件类型覆盖: {v}，允许: {sorted(allowed)}")
+        return v
+
+    @field_validator("positions_override")
+    @classmethod
+    def validate_positions_override(
+        cls, v: Optional[Dict[str, List[float]]]
+    ) -> Optional[Dict[str, List[float]]]:
+        if v is None:
+            return v
+        for view_id, pos in v.items():
+            if not isinstance(pos, (list, tuple)) or len(pos) != 2:
+                raise ValueError(
+                    f"positions_override[{view_id!r}] 必须为 [x, y] 二元组，实际: {pos!r}"
+                )
+            for coord in pos:
+                if not isinstance(coord, (int, float)):
+                    raise ValueError(
+                        f"positions_override[{view_id!r}] 坐标必须为数值，实际: {coord!r}"
+                    )
         return v
 
 

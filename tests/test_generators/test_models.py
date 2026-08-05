@@ -190,6 +190,44 @@ class TestTaskConfig:
         config = TaskConfig(views=valid_views)
         assert config.views == valid_views
 
+    def test_override_fields_default_none(self):
+        """B-M1+ 覆盖字段默认 None（向后兼容）"""
+        config = TaskConfig()
+        assert config.part_type_override is None
+        assert config.views_override is None
+        assert config.layout_mode is None
+        assert config.positions_override is None
+        assert config.projection_type_override is None
+
+    def test_override_fields_set(self):
+        """B-M1+ 覆盖字段正常赋值"""
+        config = TaskConfig(
+            part_type_override="weldment",
+            views_override=[{"action": "add", "id": "d1", "view_type": "detail"}],
+            layout_mode="manual",
+            positions_override={"front_standard": [120.0, 200.0]},
+            projection_type_override="third_angle",
+        )
+        assert config.part_type_override == "weldment"
+        assert config.layout_mode == "manual"
+        assert config.positions_override["front_standard"] == [120.0, 200.0]
+        assert config.projection_type_override == "third_angle"
+
+    def test_invalid_part_type_override(self):
+        """非法零件类型覆盖 → ValueError"""
+        with pytest.raises(ValueError, match="不支持的零件类型覆盖"):
+            TaskConfig(part_type_override="gearbox")
+
+    def test_invalid_positions_override_shape(self):
+        """positions_override 非二元组 → ValueError"""
+        with pytest.raises(ValueError, match="positions_override"):
+            TaskConfig(positions_override={"front": [1.0]})
+
+    def test_invalid_positions_override_type(self):
+        """positions_override 坐标非数值 → ValueError"""
+        with pytest.raises(ValueError, match="positions_override"):
+            TaskConfig(positions_override={"front": ["a", 1.0]})
+
 
 class TestTaskResult:
     """任务结果模型测试"""

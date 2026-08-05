@@ -9,7 +9,8 @@ standard_part > beam > plate > weldment > assembly
 
 import logging
 import re
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -72,6 +73,54 @@ class BoundingBox:
         return self.edges[1]
 
 
+# 默认视图建议（按零件类型）：view_type/name/display_name/position_hint/scale
+# scale="auto" 由布局引擎试算；局部放大/剖视等辅助视图由用户覆盖追加，默认 2.0 放大
+DEFAULT_VIEW_SUGGESTIONS: Dict[PartType, List[Dict[str, Any]]] = {
+    PartType.STANDARD_PART: [
+        {"view_type": "standard", "name": "front", "display_name": "主视图",
+         "position_hint": "center_upper", "scale": "auto"},
+    ],
+    PartType.PLATE: [
+        {"view_type": "standard", "name": "front", "display_name": "主视图",
+         "position_hint": "center_upper", "scale": "auto"},
+        {"view_type": "standard", "name": "top", "display_name": "俯视图",
+         "position_hint": "below_front", "scale": "auto"},
+        {"view_type": "standard", "name": "left", "display_name": "左视图",
+         "position_hint": "right_of_front", "scale": "auto"},
+    ],
+    PartType.BEAM: [
+        {"view_type": "standard", "name": "front", "display_name": "主视图",
+         "position_hint": "center_upper", "scale": "auto"},
+        {"view_type": "standard", "name": "right", "display_name": "右视图",
+         "position_hint": "right_of_front", "scale": "auto"},
+        {"view_type": "standard", "name": "top", "display_name": "俯视图",
+         "position_hint": "below_front", "scale": "auto"},
+        {"view_type": "isometric", "name": "isometric", "display_name": "轴测图",
+         "position_hint": "above_title_block", "scale": "auto"},
+    ],
+    PartType.WELDMENT: [
+        {"view_type": "standard", "name": "front", "display_name": "主视图",
+         "position_hint": "center_upper", "scale": "auto"},
+        {"view_type": "standard", "name": "top", "display_name": "俯视图",
+         "position_hint": "below_front", "scale": "auto"},
+        {"view_type": "standard", "name": "left", "display_name": "左视图",
+         "position_hint": "right_of_front", "scale": "auto"},
+        {"view_type": "isometric", "name": "isometric", "display_name": "轴测图",
+         "position_hint": "above_title_block", "scale": "auto"},
+    ],
+    PartType.ASSEMBLY: [
+        {"view_type": "standard", "name": "front", "display_name": "主视图",
+         "position_hint": "center_upper", "scale": "auto"},
+        {"view_type": "standard", "name": "right", "display_name": "右视图",
+         "position_hint": "right_of_front", "scale": "auto"},
+        {"view_type": "standard", "name": "top", "display_name": "俯视图",
+         "position_hint": "below_front", "scale": "auto"},
+        {"view_type": "isometric", "name": "isometric", "display_name": "轴测图",
+         "position_hint": "above_title_block", "scale": "auto"},
+    ],
+}
+
+
 @dataclass
 class TypeRecognitionResult:
     """类型识别结果"""
@@ -81,6 +130,7 @@ class TypeRecognitionResult:
     bounding_box: Optional[BoundingBox] = None
     component_count: Optional[int] = None
     filename: Optional[str] = None
+    suggested_views: List[Dict[str, Any]] = field(default_factory=list)  # B-M1+ 默认视图建议
 
 
 # 标准件关键词（中英文）
@@ -223,6 +273,7 @@ def recognize_part_type(
             bounding_box=bounding_box,
             component_count=component_count,
             filename=filename,
+            suggested_views=deepcopy(DEFAULT_VIEW_SUGGESTIONS.get(selected[0], [])),
         )
     
     # 默认回退为板类（兜底）
@@ -233,6 +284,7 @@ def recognize_part_type(
         bounding_box=bounding_box,
         component_count=component_count,
         filename=filename,
+        suggested_views=deepcopy(DEFAULT_VIEW_SUGGESTIONS[PartType.PLATE]),
     )
 
 
@@ -291,4 +343,6 @@ def to_dict(result: TypeRecognitionResult) -> Dict[str, Any]:
         data["component_count"] = result.component_count
     if result.filename:
         data["filename"] = result.filename
+    if result.suggested_views:
+        data["suggested_views"] = result.suggested_views
     return data

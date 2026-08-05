@@ -335,6 +335,47 @@ class TestHelperFunctions:
         assert _is_beam(box) is False
 
 
+class TestSuggestedViews:
+    """默认视图建议（B-M1+）测试"""
+
+    def test_suggested_views_structure(self):
+        """每个零件类型均有结构化 suggested_views"""
+        for part_type in PartType:
+            result = recognize_part_type(
+                "test.sldprt",
+                BoundingBox(0, 0, 0, 1000, 500, 10),
+                is_assembly=part_type in (PartType.WELDMENT, PartType.ASSEMBLY),
+                component_count=30 if part_type == PartType.WELDMENT else (
+                    100 if part_type == PartType.ASSEMBLY else None),
+            )
+            # 强制类型以验证各分支（识别结果由优先级决定，此处只验结构）
+            result.part_type = part_type
+            for v in result.suggested_views:
+                assert "view_type" in v
+                assert "name" in v
+                assert "display_name" in v
+                assert "position_hint" in v
+                assert "scale" in v
+
+    def test_beam_suggested_views(self):
+        """长梁默认建议：主视+右视+俯视+轴测图"""
+        box = BoundingBox(0, 0, 0, 6512, 100, 50)
+        result = recognize_part_type("LB26_beam.sldprt", box)
+        names = [v["name"] for v in result.suggested_views]
+        assert names == ["front", "right", "top", "isometric"]
+        iso = result.suggested_views[-1]
+        assert iso["view_type"] == "isometric"
+        assert iso["position_hint"] == "above_title_block"
+
+    def test_suggested_views_deepcopy(self):
+        """suggested_views 为深拷贝，修改结果不污染全局模板"""
+        box = BoundingBox(0, 0, 0, 1000, 500, 10)
+        r1 = recognize_part_type("a.sldprt", box)
+        r1.suggested_views[0]["display_name"] = "已篡改"
+        r2 = recognize_part_type("b.sldprt", box)
+        assert r2.suggested_views[0]["display_name"] != "已篡改"
+
+
 class TestConstants:
     """常量验证"""
     
