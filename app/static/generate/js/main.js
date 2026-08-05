@@ -6,7 +6,7 @@
 import { api } from './api.js';
 import { store } from './store.js';
 import * as ws from './ws.js';
-import { renderStepNav, renderProgress, renderMain, renderHistory, renderWsStatus } from './views.js';
+import { renderStepNav, renderProgress, renderMain, renderHistory, renderWsStatus, STEP_NAME_BY_NUM } from './views.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -38,7 +38,7 @@ async function createTask() {
 }
 
 async function openTask(taskId) {
-  store.set({ taskId, activeStep: 0, mainView: 'stage', task: null });
+  store.set({ taskId, activeStep: 0, activeStage: null, task: null });
   try {
     const task = await api.getTask(taskId);
     store.set({ task });
@@ -77,28 +77,37 @@ function bindEvents() {
   $('#btn-create').addEventListener('click', createTask);
   $('#btn-refresh-history').addEventListener('click', loadHistory);
 
-  // 步骤导航（事件委托）
+  // 阶段导航（事件委托）
   $('#step-nav').addEventListener('click', (e) => {
     const item = e.target.closest('.step-item');
     if (!item) return;
-    store.set({ activeStep: Number(item.dataset.step) });
+    const stage = item.dataset.stage;
+    store.set({ activeStep: 0, activeStage: stage });
+    const card = $(`#stage-card-${stage}`);
+    if (card) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
   });
 
   // 总览按钮
   $('#btn-overview').addEventListener('click', () => store.set({ activeStep: 0 }));
 
-  // 主视图切换（阶段产物 / 步骤回放）
+  // 步骤明细折叠展开
   $('#main-content').addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-view]');
-    if (!btn) return;
-    store.set({ mainView: btn.dataset.view });
+    const toggle = e.target.closest('[data-toggle-details]');
+    if (!toggle) return;
+    const key = toggle.dataset.toggleDetails;
+    const content = $(`#details-content-${key}`);
+    const isHidden = content.classList.toggle('hidden');
+    toggle.textContent = isHidden ? '▸ 步骤明细' : '▾ 步骤明细';
   });
 
   // 重跑按钮（事件委托）
   $('#main-content').addEventListener('click', (e) => {
     const btn = e.target.closest('[data-rerun]');
     if (!btn) return;
-    if (confirm(`确定从 Step ${btn.dataset.rerun} 重跑吗？后续步骤检查点将被清除。`)) {
+    const stepName = STEP_NAME_BY_NUM[Number(btn.dataset.rerun)] || `步骤 ${btn.dataset.rerun}`;
+    if (confirm(`确定从「${stepName}」重跑吗？后续步骤的产物将被清除。`)) {
       rerunFrom(Number(btn.dataset.rerun));
     }
   });

@@ -126,10 +126,7 @@
         .final-dl { text-decoration: none; display: inline-block; }
 
         /* 阶段产物页 */
-        .view-toggle { display: flex; gap: 8px; margin: 16px 0; }
-        .view-toggle .btn { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
-        .view-toggle .btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
-        .stage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+        .stage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; }
         .stage-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; background: var(--surface); }
         .stage-card.status-running { border-color: var(--warning); }
         .stage-card.status-completed { border-color: var(--success); }
@@ -139,14 +136,41 @@
         .stage-sub { font-size: 12px; color: var(--text-secondary); }
         .stage-status { font-size: 13px; margin-bottom: 12px; }
         .stage-body { font-size: 13px; }
+        .stage-section-title { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin: 14px 0 6px; }
         .stage-empty { color: var(--text-light); text-align: center; padding: 24px 0; border: 1px dashed var(--border); border-radius: var(--radius-sm); background: #f8fafc; }
         .stage-dl dt { color: var(--text-secondary); margin-top: 8px; }
         .stage-dl dd { margin-left: 0; word-break: break-all; }
-        .view-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
-        .view-item .snapshot-thumb { height: 140px; }
-        .view-caption { text-align: center; color: var(--text-secondary); font-size: 12px; margin-top: 4px; }
+        .stage-main-snap { height: 240px; margin-bottom: 10px; }
         .stage-downloads { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
         .stage-report { max-height: 240px; }
+
+        /* 步骤明细折叠区 */
+        .stage-details { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+        .details-toggle { font-size: 13px; color: var(--primary); cursor: pointer; user-select: none; }
+        .details-toggle:hover { text-decoration: underline; }
+        .details-content.hidden { display: none; }
+        .details-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+        .detail-item { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; }
+        .detail-item.status-completed { border-left: 3px solid var(--success); }
+        .detail-item.status-error { border-left: 3px solid var(--danger); }
+        .detail-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+        .detail-status { font-size: 14px; }
+        .detail-name { font-weight: 600; }
+        .detail-meta { color: var(--text-secondary); font-size: 12px; margin-left: auto; }
+        .detail-snap { width: 100%; height: 140px; object-fit: contain; background: #f8fafc; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: zoom-in; display: block; }
+        .detail-version { margin-top: 6px; }
+        .detail-version a { font-size: 12px; }
+
+        /* BOM 表 */
+        .bom-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+        .bom-table th, .bom-table td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; }
+        .bom-table th { background: var(--bg); font-weight: 600; }
+        .bom-table tr.external-part { background: #fff7e6; }
+
+        /* 技术要求 */
+        .tech-block { background: #f8fafc; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; }
+        .tech-title { font-weight: 600; margin-bottom: 6px; }
+        .tech-content { font-family: monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; margin: 0; }
 
         /* 大图灯箱 */
         .lightbox {

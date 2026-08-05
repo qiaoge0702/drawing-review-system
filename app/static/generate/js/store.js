@@ -7,6 +7,7 @@ const state = {
   taskId: null,        // 当前任务 ID
   task: null,          // 当前 TaskResult
   activeStep: 0,       // 当前查看的步骤（0 = 总览）
+  activeStage: null,   // 当前高亮/定位的阶段 key
   tasks: [],           // 历史任务列表
   wsConnected: false,
 };

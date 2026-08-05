@@ -225,9 +225,7 @@ class TestTitleBlockAndFinalize:
             captured["properties"] = properties
             captured["model_path"] = model_path
             return {"slddrw_path": f"{output_dir}/drawing.slddrw",
-                    "dwg_path": f"{output_dir}/drawing.dwg",
-                    "pdf_path": f"{output_dir}/drawing.pdf",
-                    "final_snapshot_path": f"{output_dir}/final_snapshot.png",
+                    "snapshot_path": f"{output_dir}/snapshot.png",
                     "properties_applied": list(properties),
                     "properties_readback": {}, "warnings": []}
 
@@ -252,8 +250,7 @@ class TestTitleBlockAndFinalize:
         # 缺陷3：模型路径回退自 Step2 顶层 BOM path
         assert captured["model_path"] == "C:/asm/LB26.11000.SLDASM"
         assert result["slddrw_path"].endswith("drawing.slddrw")
-        assert result["dwg_path"].endswith("drawing.dwg")
-        assert result["pdf_path"].endswith("drawing.pdf")
+        assert result["snapshot_path"].endswith("snapshot.png")
 
     @pytest.mark.asyncio
     async def test_single_material_and_weight(self, tmp_path, monkeypatch):
@@ -265,8 +262,8 @@ class TestTitleBlockAndFinalize:
         async def fake_run_sw(func, drawing_path, properties, model_path,
                               output_dir, task_id):
             captured["properties"] = properties
-            return {"slddrw_path": "a", "dwg_path": "b", "pdf_path": "c",
-                    "final_snapshot_path": "d", "properties_applied": [],
+            return {"slddrw_path": "a", "snapshot_path": "b",
+                    "properties_applied": [],
                     "properties_readback": {}, "warnings": []}
 
         monkeypatch.setattr(s7, "run_sw", fake_run_sw)

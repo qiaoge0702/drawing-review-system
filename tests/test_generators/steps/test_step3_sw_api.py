@@ -345,12 +345,10 @@ class TestFinalizeDrawingSync:
         assert r["properties_applied"] == []
         assert any("模型路径" in w for w in r["warnings"])
         assert Path(r["slddrw_path"]).exists()
-        # 四份产物全部另存
+        # Step7 职责收窄：仅保存骨架版 SLDDRW + 快照（DWG/PDF 终版导出挪至 Step4）
         assert r["slddrw_path"] == str(tmp_path / "drawing.slddrw")
-        assert r["dwg_path"] == str(tmp_path / "drawing.dwg")
-        assert r["pdf_path"] == str(tmp_path / "drawing.pdf")
-        assert r["final_snapshot_path"] == str(tmp_path / "final_snapshot.png")
-        for k in ("slddrw_path", "dwg_path", "pdf_path", "final_snapshot_path"):
+        assert r["snapshot_path"] == str(tmp_path / "snapshot.png")
+        for k in ("slddrw_path", "snapshot_path"):
             assert Path(r[k]).exists()
         assert app.closed is True
 

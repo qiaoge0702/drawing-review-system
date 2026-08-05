@@ -97,9 +97,7 @@ def _patch_run_sw(monkeypatch, captured: dict, warnings=None):
         captured["output_dir"] = output_dir
         return {
             "slddrw_path": str(Path(output_dir) / "drawing.slddrw"),
-            "dwg_path": str(Path(output_dir) / "drawing.dwg"),
-            "pdf_path": str(Path(output_dir) / "drawing.pdf"),
-            "final_snapshot_path": str(Path(output_dir) / "final_snapshot.png"),
+            "snapshot_path": str(Path(output_dir) / "snapshot.png"),
             "properties_applied": [k for k, v in properties.items() if v],
             "properties_readback": {k: v for k, v in properties.items() if v},
             "warnings": list(warnings or []),
@@ -180,12 +178,10 @@ class TestDxfBuildExecutor:
         assert props["比例"] == "1:10"
         assert captured["model_path"] == "C:/asm/LB26.00000拉臂总成.SLDASM"
 
-        # 输出契约：新增四份产物路径 + title_block
+        # 输出契约：骨架版 SLDDRW + 快照 + title_block
         out = tmp_path / "output"
         assert result["slddrw_path"] == str(out / "drawing.slddrw")
-        assert result["dwg_path"] == str(out / "drawing.dwg")
-        assert result["pdf_path"] == str(out / "drawing.pdf")
-        assert result["final_snapshot_path"] == str(out / "final_snapshot.png")
+        assert result["snapshot_path"] == str(out / "snapshot.png")
         assert result["title_block"]["scale"] == "1:10"
         assert set(result["properties_applied"]) == set(props)
 

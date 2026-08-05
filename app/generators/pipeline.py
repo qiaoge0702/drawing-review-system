@@ -34,17 +34,29 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
-# 步骤配置表
+# 运行时执行顺序：1 → 2 → 3 → 7 → 5 → 6 → 4 → 8
+# 设计意图：逐级盖楼、每级留证；Step7 紧接 Step3 完成骨架版 SLDDRW，
+# Step5/6 追加表格/技术要求，Step4 最后补标注并导出终版 DWG/PDF。
+EXECUTION_ORDER = [1, 2, 3, 7, 5, 6, 4, 8]
+
+# 步骤配置表（requires 按新执行顺序的依赖关系）
 STEP_CONFIGS = [
     StepConfig(StepName.SW_LOAD, "3D模型加载", timeout_seconds=60, retryable=True, max_retries=2),
     StepConfig(StepName.GEOMETRY_PARSE, "几何解析", timeout_seconds=120, requires=[1]),
     StepConfig(StepName.VIEW_PROJECT, "视图投影", timeout_seconds=180, requires=[2]),
-    StepConfig(StepName.DIMENSION, "尺寸标注", timeout_seconds=120, requires=[3]),
-    StepConfig(StepName.BOM_GENERATE, "BOM生成", timeout_seconds=60, requires=[2]),
-    StepConfig(StepName.TECH_REQUIREMENT, "技术要求", timeout_seconds=60, requires=[2]),
-    StepConfig(StepName.DXF_BUILD, "DXF构建", timeout_seconds=120, requires=[3, 4, 5, 6]),
-    StepConfig(StepName.REVIEW, "审查闭环", timeout_seconds=120, requires=[7]),
+    StepConfig(StepName.DIMENSION, "尺寸标注", timeout_seconds=120, requires=[6]),
+    StepConfig(StepName.BOM_GENERATE, "BOM生成", timeout_seconds=60, requires=[7]),
+    StepConfig(StepName.TECH_REQUIREMENT, "技术要求", timeout_seconds=60, requires=[5]),
+    StepConfig(StepName.DXF_BUILD, "图纸收尾", timeout_seconds=120, requires=[3]),
+    StepConfig(StepName.REVIEW, "审查闭环", timeout_seconds=120, requires=[4]),
 ]
+
+# 1x1 透明 PNG（无真图快照时的占位图，保证每步 preview.png 落盘可追踪）
+_PLACEHOLDER_PNG_BYTES = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d49444154789c626000010000050001a5f64540000000"
+    "49454e44ae426082"
+)
 
 
 class GeneratePipeline:
@@ -119,7 +131,7 @@ class GeneratePipeline:
         self._save_task_meta(task_id, source_file)
         
         try:
-            for step_num in range(1, 9):
+            for exec_index, step_num in enumerate(EXECUTION_ORDER, start=1):
                 step_config = STEP_CONFIGS[step_num - 1]
                 
                 # 检查是否有可用的完成检查点（失败/损坏的不算）
@@ -128,7 +140,7 @@ class GeneratePipeline:
                     logger.info(f"[Task:{task_id}] Step {step_num} found checkpoint, loading...")
                     result.steps.append(checkpoint)
                     result.current_step = step_num
-                    result.progress = int(step_num / 8 * 100)
+                    result.progress = int(exec_index / 8 * 100)
                     continue
                 
                 # 执行步骤（含重试循环，重试次数累加）
@@ -162,7 +174,7 @@ class GeneratePipeline:
                 
                 result.steps.append(step_result)
                 result.current_step = step_num
-                result.progress = int(step_num / 8 * 100)
+                result.progress = int(exec_index / 8 * 100)
                 
                 # 仅成功的步骤保存检查点
                 if step_result.is_success:
@@ -236,8 +248,13 @@ class GeneratePipeline:
             for key, value in parameter_overrides.items():
                 setattr(config, key, value)
         
-        # 清除目标步骤及后续的检查点
-        for step_num in range(from_step, 9):
+        # 清除目标步骤及执行顺序中后续步骤的检查点（按 EXECUTION_ORDER）
+        if from_step not in EXECUTION_ORDER:
+            raise ValueError(
+                f"from_step {from_step} 不在执行顺序 {EXECUTION_ORDER} 中"
+            )
+        start_idx = EXECUTION_ORDER.index(from_step)
+        for step_num in EXECUTION_ORDER[start_idx:]:
             self._clear_checkpoint(task_id, step_num)
         
         # 重新执行
@@ -300,6 +317,9 @@ class GeneratePipeline:
             step_result.status = StepStatus.COMPLETED
             step_result.output_data = output_data
             step_result.completed_at = datetime.utcnow()
+
+            # 每步留痕：result.json + preview.png + 版本副本（7/5/6/4）
+            await self._leave_trace(ctx, step_result)
             
             # 收集产物
             output_dir = step_dir / "output"
@@ -331,7 +351,110 @@ class GeneratePipeline:
             step_result.duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
         
         return step_result
-    
+
+    async def _leave_trace(self, ctx: StepContext, step_result: StepResult) -> None:
+        """
+        每步成功后落盘可追溯产物：
+        - result.json：该步输出数据
+        - preview.png：真图快照（无快照时落盘占位图，保证可追踪）
+        - 版本副本：Step7→step7_skeleton.slddrw，Step5→step5_table.slddrw，
+                    Step6→step6_table.slddrw，Step4→step4_final.slddrw
+        Step4 末尾额外导出终版 DWG/PDF/PNG（终版导出从 Step7 迁移至此）。
+        """
+        output_dir = ctx.get_output_path("")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        data = step_result.output_data or {}
+        task_dir = self._get_task_dir(ctx.task_id)
+
+        # 1) result.json
+        result_file = output_dir / "result.json"
+        try:
+            with open(result_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        except Exception as e:
+            logger.warning(f"[Task:{ctx.task_id}] Step {ctx.step} result.json 落盘失败: {e}")
+
+        # 2) preview.png：优先复用执行器产出的快照
+        preview_file = output_dir / "preview.png"
+        snapshot_src: Optional[Path] = None
+        for key in ("final_snapshot_path", "snapshot_path"):
+            src = data.get(key)
+            if src:
+                p = Path(src)
+                if p.exists():
+                    snapshot_src = p
+                    break
+        if not snapshot_src:
+            for f in output_dir.iterdir():
+                if f.suffix.lower() == ".png":
+                    snapshot_src = f
+                    break
+        try:
+            if snapshot_src and snapshot_src.resolve() != preview_file.resolve():
+                shutil.copy2(snapshot_src, preview_file)
+            elif not preview_file.exists():
+                preview_file.write_bytes(_PLACEHOLDER_PNG_BYTES)
+        except Exception as e:
+            logger.warning(f"[Task:{ctx.task_id}] Step {ctx.step} preview.png 落盘失败: {e}")
+
+        # 3) 版本副本（逐级盖楼）
+        version_copy: Optional[Path] = None
+        if ctx.step == 7:
+            src_key = data.get("slddrw_path") or ctx.previous_results.get(3, {}).get("drawing_path")
+            if src_key:
+                src = Path(src_key)
+                if src.exists():
+                    version_copy = output_dir / "step7_skeleton.slddrw"
+                    shutil.copy2(src, version_copy)
+                else:
+                    logger.warning(f"[Task:{ctx.task_id}] Step {ctx.step} 上一步版本副本缺失，跳过复制: {src}")
+        elif ctx.step == 5:
+            src = task_dir / "step_7" / "output" / "step7_skeleton.slddrw"
+            if src.exists():
+                version_copy = output_dir / "step5_table.slddrw"
+                shutil.copy2(src, version_copy)
+            else:
+                logger.warning(f"[Task:{ctx.task_id}] Step {ctx.step} 上一步版本副本缺失，跳过复制: {src}")
+        elif ctx.step == 6:
+            src = task_dir / "step_5" / "output" / "step5_table.slddrw"
+            if src.exists():
+                version_copy = output_dir / "step6_table.slddrw"
+                shutil.copy2(src, version_copy)
+            else:
+                logger.warning(f"[Task:{ctx.task_id}] Step {ctx.step} 上一步版本副本缺失，跳过复制: {src}")
+        elif ctx.step == 4:
+            src = task_dir / "step_6" / "output" / "step6_table.slddrw"
+            if src.exists():
+                version_copy = output_dir / "step4_final.slddrw"
+                shutil.copy2(src, version_copy)
+                # 终版全格式导出挪到 Step4 完成后
+                await self._export_final_version(ctx.task_id, version_copy, output_dir)
+            else:
+                logger.warning(f"[Task:{ctx.task_id}] Step {ctx.step} 上一步版本副本缺失，跳过复制: {src}")
+
+        if version_copy:
+            logger.debug(f"[Task:{ctx.task_id}] Step {ctx.step} 版本副本 -> {version_copy}")
+
+    async def _export_final_version(self, task_id: str, slddrw_path: Path, output_dir: Path) -> None:
+        """
+        Step4 完成后导出终版 DWG/PDF/PNG。
+        真机由 sw_drawing.export_final_sync 在 SW COM 线程执行；
+        导出失败仅记录 warning，不阻塞流水线（Step4 本身已成功留痕）。
+        """
+        try:
+            from app.generators import sw_drawing
+            from app.generators.sw_com import run_sw
+
+            await run_sw(
+                sw_drawing.export_final_sync,
+                str(slddrw_path),
+                str(output_dir),
+                task_id,
+            )
+            logger.info(f"[Task:{task_id}] Step4 终版导出完成 -> {output_dir}")
+        except Exception as e:
+            logger.warning(f"[Task:{task_id}] Step4 终版导出失败（后续可单独重跑或人工导出）: {e}")
+
     # --- 检查点管理 ---
     
     def _save_checkpoint(self, task_id: str, step_result: StepResult):

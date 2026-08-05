@@ -5,7 +5,7 @@
 ## 3.1 职责
 SW原生真图纸引擎封装，提供两阶段API：
 - `create_drawing_sync`: Step3建图纸+真视图+PNG快照
-- `finalize_drawing_sync`: Step7写标题栏属性+导出DWG/PDF
+- `finalize_drawing_sync`: Step7骨架收尾：写标题栏属性+存骨架版 `step7_skeleton.slddrw`；终版 DWG/PDF 导出挪至 Step4 完成后执行
 
 ## 3.2 关键接口与契约
 

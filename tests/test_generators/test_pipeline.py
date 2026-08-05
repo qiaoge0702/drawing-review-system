@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-from app.generators.pipeline import GeneratePipeline, STEP_CONFIGS
+from app.generators.pipeline import GeneratePipeline, STEP_CONFIGS, EXECUTION_ORDER
 from app.generators.models import StepContext
 from app.models.generation import (
     TaskConfig,
@@ -22,6 +22,34 @@ from app.models.generation import (
     ArtifactType,
 )
 from app.core.exceptions import GenerationException, ErrorCode
+
+
+@pytest.fixture(autouse=True)
+def _patch_export_final_sync(monkeypatch):
+    """测试期间屏蔽真实的 SW 终版导出，避免启动 SolidWorks。"""
+    def fake_export(slddrw_path, output_dir, task_id="", sw_app=None):
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "drawing.dwg").write_text("fake dwg", encoding="utf-8")
+        (out / "drawing.pdf").write_text("fake pdf", encoding="utf-8")
+        (out / "final_snapshot.png").write_bytes(
+            bytes.fromhex(
+                "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+                "1f15c4890000000d49444154789c626000010000050001a5f64540000000"
+                "49454e44ae426082"
+            )
+        )
+        return {
+            "slddrw_path": slddrw_path,
+            "dwg_path": str(out / "drawing.dwg"),
+            "pdf_path": str(out / "drawing.pdf"),
+            "snapshot_path": str(out / "final_snapshot.png"),
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        "app.generators.sw_drawing.export_final_sync", fake_export
+    )
 
 
 class MockExecutor:
@@ -83,7 +111,7 @@ class TestGeneratePipeline:
         assert len(STEP_CONFIGS) == 8
     
     def test_step_configs_order(self):
-        """测试步骤配置顺序"""
+        """测试步骤配置顺序与 requires 链"""
         expected_names = [
             StepName.SW_LOAD,
             StepName.GEOMETRY_PARSE,
@@ -96,6 +124,22 @@ class TestGeneratePipeline:
         ]
         actual_names = [cfg.name for cfg in STEP_CONFIGS]
         assert actual_names == expected_names
+
+        # 新执行顺序下的 requires 链（StepName 枚举顺序即步骤编号）
+        expected_requires = {
+            1: [],
+            2: [1],
+            3: [2],
+            4: [6],
+            5: [7],
+            6: [5],
+            7: [3],
+            8: [4],
+        }
+        for cfg in STEP_CONFIGS:
+            step_no = list(StepName).index(cfg.name) + 1
+            assert cfg.requires == expected_requires[step_no]
+
     
     @pytest.mark.asyncio
     async def test_full_pipeline_success(self, pipeline, mock_executors):
@@ -123,13 +167,16 @@ class TestGeneratePipeline:
         assert result.progress == 100
         assert result.is_completed is True
         assert result.is_failed is False
-        
+
+        # 验证执行顺序：1 → 2 → 3 → 7 → 5 → 6 → 4 → 8
+        actual_order = [step.step for step in result.steps]
+        assert actual_order == EXECUTION_ORDER
+
         # 验证每个步骤都执行了
-        for i, step in enumerate(result.steps, 1):
-            assert step.step == i
+        for step in result.steps:
             assert step.status == StepStatus.COMPLETED
             assert step.duration_ms >= 0
-        
+
         # 验证执行器被调用
         for executor in mock_executors.values():
             assert executor.call_count == 1
@@ -219,23 +266,25 @@ class TestGeneratePipeline:
         for executor in mock_executors.values():
             executor.call_count = 0
         
-        # 从第4步重跑
+        # 从第4步重跑（新执行顺序中 4 之后仅剩 8）
         result = await pipeline.rerun_from(
             task_id="test_004",
             from_step=4,
         )
-        
+
         # 验证结果
         assert result.status == PipelineState.COMPLETED
-        
-        # 验证前3步没有重新执行（检查点命中）
+
+        # 验证前序步骤没有重新执行（检查点命中）
         assert mock_executors[StepName.SW_LOAD].call_count == 0
         assert mock_executors[StepName.GEOMETRY_PARSE].call_count == 0
         assert mock_executors[StepName.VIEW_PROJECT].call_count == 0
-        
-        # 验证第4步及以后重新执行
+        assert mock_executors[StepName.BOM_GENERATE].call_count == 0
+        assert mock_executors[StepName.TECH_REQUIREMENT].call_count == 0
+        assert mock_executors[StepName.DXF_BUILD].call_count == 0
+
+        # 验证第4步及后续重新执行
         assert mock_executors[StepName.DIMENSION].call_count == 1
-        assert mock_executors[StepName.DXF_BUILD].call_count == 1
         assert mock_executors[StepName.REVIEW].call_count == 1
     
     @pytest.mark.asyncio
@@ -417,3 +466,123 @@ class TestCheckpointRobustness:
         assert executors[StepName.VIEW_PROJECT].call_count == 1
         assert executors[StepName.SW_LOAD].call_count == 0
         assert executors[StepName.GEOMETRY_PARSE].call_count == 0
+
+
+class TestPipelineReorderAndTrace:
+    """B-M2 执行顺序重排 + 每步留痕专项测试"""
+
+    @pytest.fixture
+    def pipeline(self, tmp_path):
+        return GeneratePipeline(storage_root=tmp_path / "generate_storage")
+
+    def _make_source(self, pipeline) -> str:
+        source_file = pipeline.storage_root / "test.SLDASM"
+        source_file.parent.mkdir(parents=True, exist_ok=True)
+        source_file.write_text("mock")
+        return str(source_file)
+
+    def _build_executors(self, pipeline):
+        """构造可追踪的版本链：Step3 产出 fake drawing/snapshot。"""
+        class _Step3WithFiles(MockExecutor):
+            async def __call__(self, ctx: StepContext):
+                result = await super().__call__(ctx)
+                # 模拟 Step3 留下中间 SLDDRW + 快照
+                out = ctx.get_output_path("")
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "drawing.slddrw").write_text("fake slddrw", encoding="utf-8")
+                (out / "snapshot.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+                result["drawing_path"] = str(out / "drawing.slddrw")
+                result["snapshot_path"] = str(out / "snapshot.png")
+                return result
+
+        executors = {
+            StepName.SW_LOAD: MockExecutor(success=True, output={"file_type": "assembly"}),
+            StepName.GEOMETRY_PARSE: MockExecutor(success=True, output={"bom": []}),
+            StepName.VIEW_PROJECT: _Step3WithFiles(success=True, output={"views": []}),
+            StepName.DIMENSION: MockExecutor(success=True, output={"dimensions": []}),
+            StepName.BOM_GENERATE: MockExecutor(success=True, output={"bom_table": []}),
+            StepName.TECH_REQUIREMENT: MockExecutor(success=True, output={"requirements": []}),
+            StepName.DXF_BUILD: MockExecutor(success=True, output={"dxf_path": "test.dxf"}),
+            StepName.REVIEW: MockExecutor(success=True, output={"issues": []}),
+        }
+        for name, exe in executors.items():
+            pipeline.register_executor(name, exe)
+        return executors
+
+    @pytest.mark.asyncio
+    async def test_execution_order_is_new_sequence(self, pipeline):
+        """mock 执行器记录调用序列，断言为 1,2,3,7,5,6,4,8"""
+        executors = self._build_executors(pipeline)
+        source = self._make_source(pipeline)
+
+        result = await pipeline.run("t_order", source, TaskConfig())
+        assert result.status == PipelineState.COMPLETED
+        assert [step.step for step in result.steps] == EXECUTION_ORDER
+
+        call_order = []
+        for step_no in EXECUTION_ORDER:
+            cfg = STEP_CONFIGS[step_no - 1]
+            call_order.append((step_no, executors[cfg.name].call_count))
+        assert [step_no for step_no, cnt in call_order] == EXECUTION_ORDER
+        assert all(cnt == 1 for _, cnt in call_order)
+
+    @pytest.mark.asyncio
+    async def test_trace_files_landed(self, pipeline):
+        """每步成功后 output/step_N/ 留下 result.json + preview.png，
+        7/5/6/4 留下版本副本 SLDDRW。"""
+        self._build_executors(pipeline)
+        source = self._make_source(pipeline)
+
+        await pipeline.run("t_trace", source, TaskConfig())
+
+        for step_no in EXECUTION_ORDER:
+            step_dir = pipeline.storage_root / "t_trace" / f"step_{step_no}" / "output"
+            assert (step_dir / "result.json").exists(), f"Step{step_no} 缺 result.json"
+            assert (step_dir / "preview.png").exists(), f"Step{step_no} 缺 preview.png"
+
+        # 版本副本
+        assert (pipeline.storage_root / "t_trace" / "step_7" / "output" / "step7_skeleton.slddrw").exists()
+        assert (pipeline.storage_root / "t_trace" / "step_5" / "output" / "step5_table.slddrw").exists()
+        assert (pipeline.storage_root / "t_trace" / "step_6" / "output" / "step6_table.slddrw").exists()
+        assert (pipeline.storage_root / "t_trace" / "step_4" / "output" / "step4_final.slddrw").exists()
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_skip_in_new_order(self, pipeline):
+        """检查点命中后只跳过已完成步骤，失败步骤仍重跑。"""
+        executors = self._build_executors(pipeline)
+        source = self._make_source(pipeline)
+
+        result1 = await pipeline.run("t_cp_order", source, TaskConfig())
+        assert result1.status == PipelineState.COMPLETED
+
+        for ex in executors.values():
+            ex.call_count = 0
+
+        result2 = await pipeline.run("t_cp_order", source, TaskConfig())
+        assert result2.status == PipelineState.COMPLETED
+        # 全部命中检查点，执行器不应再被调用
+        assert all(ex.call_count == 0 for ex in executors.values())
+
+    @pytest.mark.asyncio
+    async def test_rerun_from_step7_clears_downstream_in_order(self, pipeline):
+        """从 Step7 重跑应清除 7,5,6,4,8 并重新执行。"""
+        executors = self._build_executors(pipeline)
+        source = self._make_source(pipeline)
+
+        await pipeline.run("t_rerun7", source, TaskConfig())
+        for ex in executors.values():
+            ex.call_count = 0
+
+        result = await pipeline.rerun_from("t_rerun7", from_step=7)
+        assert result.status == PipelineState.COMPLETED
+
+        # 1/2/3 不应重跑
+        assert executors[StepName.SW_LOAD].call_count == 0
+        assert executors[StepName.GEOMETRY_PARSE].call_count == 0
+        assert executors[StepName.VIEW_PROJECT].call_count == 0
+        # 7/5/6/4/8 应重跑
+        assert executors[StepName.DXF_BUILD].call_count == 1
+        assert executors[StepName.BOM_GENERATE].call_count == 1
+        assert executors[StepName.TECH_REQUIREMENT].call_count == 1
+        assert executors[StepName.DIMENSION].call_count == 1
+        assert executors[StepName.REVIEW].call_count == 1

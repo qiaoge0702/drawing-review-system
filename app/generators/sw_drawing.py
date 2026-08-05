@@ -572,6 +572,72 @@ def _save_as(drw: Any, path: str, warnings: List[str], label: str) -> None:
         )
 
 
+def _save_as_png(drw: Any, path: str, warnings: List[str], label: str = "PNG snapshot") -> None:
+    """PNG 整图导出：优先按图纸页（Sheet）完整范围输出，而非当前视图/窗口裁剪。
+
+    真机缺陷：SW 中图纸完整，但 preview.png 被裁/缺区域，根因是 SaveAs PNG
+    默认按屏幕/视图区域导出。本函数尝试使用 ExportAsPNGOptions 指定纸张/图纸
+    范围；如 API 不可用或参数名有误，则回退到原有 _save_as，避免阻断流程。
+
+    SW API 存疑（需老板查官方文档确认）：
+    1. 获取选项对象：sw_app.GetExportFileData(swExportImageFileType_PNG?)
+       或 win32com.client.Dispatch("SldWorks.ExportAsPNGOptions")？
+    2. 整图范围参数名：ExportAsPNGOptions.OutputSize / ImageSize / PrintArea？
+       对应枚举值 swExportImageSize_SheetBounds / swExportImageSize_PrintAreaSheet？
+    3. 是否还需同时设 Width/Height/DPI？图纸范围与 DPI 是否互斥？
+    4. 若 ExportAsPNGOptions 无效，备选 API：ModelDoc2.PrintOut/PrintOut2
+       配合 PrintSpecification.PrintArea = swPrintAreaSheet。
+    """
+    tried_options = False
+    try:
+        import pythoncom
+        import win32com.client
+
+        # 尝试拿到 SW Application 以创建导出选项（drw.Application 在 COM 中通常可用）
+        sw_app = getattr(drw, "Application", None)
+        if sw_app is None:
+            raise RuntimeError("无法获取 drw.Application，无法创建 ExportAsPNGOptions")
+
+        # 候选①：通过 Application.GetExportFileData 创建 PNG 选项对象
+        # swExportImageFileType_e 中 PNG 枚举值可能是 2 或 4，此处用 2 尝试；
+        # 失败则回退候选②直接 Dispatch。
+        export_data = None
+        try:
+            export_data = sw_app.GetExportFileData(2)
+        except Exception:
+            export_data = win32com.client.Dispatch("SldWorks.ExportAsPNGOptions")
+
+        if export_data is not None:
+            # 候选整图范围参数：OutputSize / ImageSize / PrintArea（不确定正确名）
+            # 优先尝试 OutputSize = 1（假设 SheetBounds 枚举值为 1），失败静默忽略
+            for prop_name in ("OutputSize", "ImageSize", "PrintArea"):
+                try:
+                    setattr(export_data, prop_name, 1)
+                    break
+                except Exception:
+                    continue
+            else:
+                warnings.append(
+                    "PNG 整图导出：未能设置图纸范围参数（OutputSize/ImageSize/PrintArea），"
+                    "请老板确认 ExportAsPNGOptions 正确成员名/枚举值")
+
+            errors = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+            warns = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+            ok = drw.Extension.SaveAs(path, 0, _SAVEAS_SILENT, export_data,
+                                      errors, warns)
+            if ok:
+                return
+            tried_options = True
+    except Exception as e:
+        logger.debug(f"PNG 整图导出尝试失败 ({e})，回退到通用 SaveAs")
+
+    if tried_options:
+        warnings.append(
+            "PNG 整图导出：ExportAsPNGOptions 调用未返回成功，回退到通用 SaveAs；"
+            "真机请确认 SheetBounds 参数是否正确")
+    _save_as(drw, path, warnings, label)
+
+
 def _measure_outlines(inserted: Dict[str, Any], view_names: Sequence[str],
                       task_id: str) -> Dict[str, Tuple[float, float, float, float]]:
     """视图轮廓实测（GetOutline，米）；任一失败 → SWException（禁止静默）"""
@@ -979,7 +1045,7 @@ def create_drawing_sync(
         slddrw_path = str(out / "drawing.slddrw")
         snapshot_path = str(out / "snapshot.png")
         _save_as(drw, slddrw_path, warnings, "SLDDRW")
-        _save_as(drw, snapshot_path, warnings, "PNG snapshot")
+        _save_as_png(drw, snapshot_path, warnings, "PNG snapshot")
         
         logger.info(
             f"[Task:{task_id}] SW native drawing done -> {slddrw_path} "
@@ -1073,8 +1139,9 @@ def finalize_drawing_sync(slddrw_path: str, properties: Dict[str, str],
         sw_app: 注入的 SW Application（测试用）
 
     Returns:
-        {"slddrw_path", "dwg_path", "pdf_path", "final_snapshot_path",
-         "properties_applied", "properties_readback", "warnings"}
+        {"slddrw_path", "snapshot_path", "properties_applied",
+         "properties_readback", "warnings"}
+        （B-M1 修复：返回键统一为 snapshot_path，与 step7_dxf_build 执行器一致）
 
     Raises:
         SWException(GEN_SW_NOT_AVAILABLE): SW 不可用/图纸打不开
@@ -1166,23 +1233,67 @@ def finalize_drawing_sync(slddrw_path: str, properties: Dict[str, str],
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         final_slddrw = str(out / "drawing.slddrw")
-        dwg_path = str(out / "drawing.dwg")
-        pdf_path = str(out / "drawing.pdf")
-        png_path = str(out / "final_snapshot.png")
+        png_path = str(out / "snapshot.png")
         _save_as(drw, final_slddrw, warnings, "SLDDRW")
-        _save_as(drw, dwg_path, warnings, "DWG")
-        _save_as(drw, pdf_path, warnings, "PDF")
-        _save_as(drw, png_path, warnings, "PNG snapshot")
+        _save_as_png(drw, png_path, warnings, "PNG snapshot")
         logger.info(f"[Task:{task_id}] drawing finalized -> {final_slddrw} "
-                    f"(dwg/pdf/png alongside, props={applied}, "
+                    f"(skeleton slddrw + snapshot, props={applied}, "
                     f"readback={readback})")
         return {"slddrw_path": final_slddrw,
-                "dwg_path": dwg_path,
-                "pdf_path": pdf_path,
-                "final_snapshot_path": png_path,
+                "snapshot_path": png_path,
                 "properties_applied": applied,
                 "properties_readback": readback,
                 "warnings": warnings}
+    finally:
+        try:
+            sw_app.CloseAllDocuments(True)
+        except Exception as e:
+            logger.warning(f"CloseAllDocuments failed: {e}")
+
+
+def export_final_sync(slddrw_path: str, output_dir: str, task_id: str = "",
+                      sw_app: Any = None) -> Dict[str, Any]:
+    """
+    【同步/COM线程】Step4 完成后终版全格式导出：SLDDRW→DWG/PDF/PNG。
+
+    Args:
+        slddrw_path: 终版 SLDDRW 路径（如 step4_final.slddrw）
+        output_dir: 导出文件落盘目录
+        task_id: 日志上下文
+        sw_app: 注入的 SW Application（测试用）
+
+    Returns:
+        {"slddrw_path", "dwg_path", "pdf_path", "snapshot_path", "warnings"}
+    """
+    from pathlib import Path
+    sw_app, _own = _dispatch_sw(sw_app)
+    warnings: List[str] = []
+
+    try:
+        drw = _open_doc(sw_app, slddrw_path, read_only=False)
+        if drw is None:
+            raise SWException(
+                f"Failed to open drawing for export: {slddrw_path}",
+                error_code=ErrorCode.GEN_SW_NOT_AVAILABLE,
+            )
+        drw.ForceRebuild3(True)
+
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        dwg_path = str(out / "drawing.dwg")
+        pdf_path = str(out / "drawing.pdf")
+        png_path = str(out / "final_snapshot.png")
+        _save_as(drw, dwg_path, warnings, "DWG")
+        _save_as(drw, pdf_path, warnings, "PDF")
+        _save_as_png(drw, png_path, warnings, "PNG snapshot")
+        logger.info(f"[Task:{task_id}] final export done -> dwg/pdf/png in {output_dir}")
+        return {
+            "slddrw_path": slddrw_path,
+            "dwg_path": dwg_path,
+            "pdf_path": pdf_path,
+            "snapshot_path": png_path,
+            "warnings": warnings,
+        }
     finally:
         try:
             sw_app.CloseAllDocuments(True)

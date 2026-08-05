@@ -164,10 +164,10 @@ class DxfBuildExecutor:
 
     输入: ctx.previous_results[3]/output/views.json（必需，含 drawing_path）；
           ctx.previous_results[2]/output/geometry.json（可选，标题栏信息来源）
-    输出: {"title_block": {...}, "slddrw_path", "dwg_path", "pdf_path",
-           "final_snapshot_path", "properties_applied", "warnings"?}，
-          落盘 output/drawing.slddrw / drawing.dwg / drawing.pdf /
-          final_snapshot.png
+    输出: {"title_block": {...}, "slddrw_path", "snapshot_path",
+           "properties_applied", "warnings"?}，
+          落盘 output/drawing.slddrw / snapshot.png
+          （B-M1 修复：返回键统一为 snapshot_path，与 sw_drawing.finalize_drawing_sync 一致）
     异常: 缺 Step3 产物或 drawing_path / COM 失败 → SWException 上抛
     """
 
@@ -228,14 +228,12 @@ class DxfBuildExecutor:
         result: Dict[str, Any] = {
             "title_block": title,
             "slddrw_path": fin["slddrw_path"],
-            "dwg_path": fin["dwg_path"],
-            "pdf_path": fin["pdf_path"],
-            "final_snapshot_path": fin["final_snapshot_path"],
+            "snapshot_path": fin["snapshot_path"],
             "properties_applied": fin.get("properties_applied") or [],
             "properties_readback": fin.get("properties_readback") or {},
         }
         if warnings:
             result["warnings"] = warnings
         logger.info(f"[Task:{ctx.task_id}] drawing finalized -> "
-                    f"{result['slddrw_path']} (+dwg/pdf/png)")
+                    f"{result['slddrw_path']} (skeleton slddrw + snapshot)")
         return result

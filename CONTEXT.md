@@ -33,7 +33,7 @@ drawing-review-system/
 │   ├── parsers/  ai/  rules/  renderers/     # ✅ 审查模块（P0 成品，不动）
 │   ├── generators/        # pipeline.py + sw_com.py + sw_drawing.py（✅ 复用）
 │   │   └── steps/         # step1/2/6 ✅ 复用；step3/4/5/7 🔄 方案B 重写
-│   └── templates/ + static/generate/js/      # ✅ 复用，扩展步骤回放/工作台
+│   └── templates/ + static/generate/js/      # ✅ 复用，阶段产物页（五阶段分组+步骤明细折叠）
 ├── tests/                 # 未改动模块基线保留；step3/4/5/7 测试随重写更新
 ├── docs/00-04 + assets/   # 00索引/01总计划/02方案B设计/03业务需求/04图纸参考 + 资产手册分册
 │   ├── 当前状态.md         # 唯一动态状态来源
