@@ -2,9 +2,10 @@
 布局算法单元测试（B-M1 智能骨架 - 第一角投影）
 
 测试覆盖：
-- 第一角投影布局（主视中上、俯视下方、右视右侧、轴测左下）
+- 第一角投影布局（主视中上、俯视下方、右视右侧、轴测标题栏上方右侧）
 - 视图不重叠
 - 图幅边界校验
+- 标题栏禁放区校验
 - 比例重算机制
 - LB26长梁布局验证
 """
@@ -20,6 +21,7 @@ from app.generators.steps.step3_view_project import (
     _build_layout_b_m1,
     _MAX_SCALE_RETRIES,
     _SHEET_SIZES,
+    _TITLE_BLOCK_FALLBACK_HEIGHT,
 )
 from app.generators.type_recognition import PartType, BoundingBox
 from app.generators.view_strategy import (
@@ -85,8 +87,8 @@ class TestFirstAngleLayoutEngine:
         # 在右侧
         assert right["x"] > front["x"]
     
-    def test_isometric_bottom_left(self):
-        """轴测图在左下角（1:2 比例）"""
+    def test_isometric_above_title_block(self):
+        """轴测图按 above_title_block hint 摆在标题栏上方右侧区域"""
         engine = FirstAngleLayoutEngine(SHEET_A3_WIDTH, SHEET_A3_HEIGHT)
         view_sizes = {
             "front": (200, 150),
@@ -94,16 +96,16 @@ class TestFirstAngleLayoutEngine:
             "top": (200, 100),
             "isometric": (150, 120),
         }
-        
+
         positions = engine.layout(view_sizes, 2.0, get_view_strategy(PartType.BEAM))
-        
+
         assert positions is not None
         assert "isometric" in positions
         iso = positions["isometric"]
-        
-        # 在左下角区域（非负坐标）
+
+        # 在标题栏上方右侧区域
         assert iso["x"] >= 0
-        assert iso["y"] >= 0
+        assert iso["y"] >= _TITLE_BLOCK_FALLBACK_HEIGHT
     
     def test_isometric_no_overlap(self):
         """轴测图不与其他视图重叠"""

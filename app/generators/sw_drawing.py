@@ -42,6 +42,7 @@ from app.generators.type_recognition import (
 )
 from app.generators.view_strategy import (
     ViewName,
+    ViewStrategy,
     get_view_strategy,
     compute_view_sizes,
     select_scale_for_sheet,
@@ -51,6 +52,10 @@ from app.generators.view_strategy import (
     SHEET_A3_HEIGHT,
     LAYOUT_MARGIN,
     LAYOUT_GAP_DEFAULT,
+)
+from app.generators.steps.step3_view_project import (
+    FirstAngleLayoutEngine,
+    measure_title_block_rect,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,24 +161,26 @@ def _layout_fill_ratio(positions: Dict[str, Any], sheet_w: float,
     return ((x1 - x0) * (y1 - y0)) / (sheet_w * sheet_h)
 
 
-def _rects_intersect(a: Dict[str, float], b: Dict[str, float]) -> bool:
-    return (a["x"] < b["x"] + b["width"] and b["x"] < a["x"] + a["width"]
-            and a["y"] < b["y"] + b["height"]
-            and b["y"] < a["y"] + a["height"])
-
-
 def _pick_scale_measured_impl(measured_sizes, den_cur, sheet_w, sheet_h,
-                              task_id, warnings):
+                              task_id, warnings,
+                              strategy: Optional[ViewStrategy] = None,
+                              title_block_bbox: Optional[Tuple[float, float, float, float]] = None):
     """按实测视图尺寸（当前 1:den_cur 下的图纸 mm）从 GB 比例系列从大到小
     模拟排布，选占图幅 <=85% 的最大比例（老板 2026-08-02 定调 70-85% 饱满
-    带）；<70% 如实 warning；末档仍装不下 → 截断 + warning"""
+    带）；<70% 如实 warning；末档仍装不下 → 截断 + warning。
+
+    本函数无 SW 视图对象，走纯估算路径（仅供图幅/比例选型）。"""
+    if strategy is None:
+        strategy = get_view_strategy(PartType.PLATE)
+    engine = FirstAngleLayoutEngine(
+        sheet_w, sheet_h, strategy.spacing, title_block_bbox=title_block_bbox
+    )
     best = None
     for n in GB_SCALE_RATIOS:
         ratio = den_cur / float(n)  # 当前 1:den_cur → 目标 1:n 的线性缩放比
         sizes_n = {name: (w * ratio, h * ratio)
                    for name, (w, h) in measured_sizes.items()}
-        pos = _first_angle_layout_b_m1(sizes_n, 1.0, sheet_w, sheet_h,
-                                       LAYOUT_GAP_DEFAULT)
+        pos = engine.layout(sizes_n, 1.0, strategy)
         if pos is None:
             continue
         fill = _layout_fill_ratio(pos, sheet_w, sheet_h)
@@ -218,124 +225,6 @@ def _view_sizes_from_box_b_m1(
     return {name.value: (w, h) for name, (w, h) in view_sizes_raw.items()}
 
 
-def _first_angle_layout_b_m1(
-    view_sizes: Dict[str, Tuple[float, float]],
-    scale_den: float,
-    sheet_w: float,
-    sheet_h: float,
-    spacing: float = LAYOUT_GAP_DEFAULT,
-) -> Optional[Dict[str, Any]]:
-    """
-    B-M1 第一角投影布局算法
-    
-    摆位规则：
-    - 主视中上居中
-    - 右视在主视右侧（间距20-30mm，Y平齐）
-    - 俯视在主视正下方（X对齐，间距20-30mm）
-    - 轴测图左下角（不与其他视图重叠）
-    
-    Returns:
-        各视图位置，或None（超出图幅）
-    """
-    # 按比例缩放
-    scaled = {
-        name: (w / scale_den, h / scale_den)
-        for name, (w, h) in view_sizes.items()
-    }
-    
-    positions: Dict[str, Any] = {}
-    margin = LAYOUT_MARGIN
-    
-    # 确定主视图：front/left/right 中最宽者（长梁类长视图作主视，
-    # 对照 LB26.00000 参考图主视占图幅宽 ~60%）；缺省取首个
-    main_candidates = [n for n in ("front", "left", "right") if n in scaled]
-    if main_candidates:
-        main_view = max(main_candidates, key=lambda n: scaled[n][0])
-    else:
-        main_view = list(scaled.keys())[0]
-    mw, mh = scaled[main_view]
-    
-    # 主视居中偏上：有侧视时按 主视+间距+侧视 整组水平居中（老板 2026-08-03
-    # 验收：单主视居中会把侧视挤出右边界 → 被迫缩小比例；整组居中可保更大比例）
-    side_view = None
-    for _cand in ("front", "right", "left"):
-        if _cand in scaled and _cand != main_view:
-            side_view = _cand
-            break
-    side_w = scaled[side_view][0] if side_view else 0.0
-    group_w = mw + (spacing + side_w if side_view else 0.0)
-    main_x = (sheet_w - group_w) / 2  # 整组水平居中
-    main_y = sheet_h - margin - mh  # 居中偏上
-    positions[main_view] = {
-        "x": round(main_x, 4),
-        "y": round(main_y, 4),
-        "width": round(mw, 4),
-        "height": round(mh, 4),
-    }
-    
-    # 俯视图在主视正下方
-    if "top" in scaled:
-        tw, th = scaled["top"]
-        top_x = main_x  # X对齐主视
-        top_y = main_y - spacing - th  # 主视正下方
-        if top_y < margin:
-            return None  # 超出下边界
-        positions["top"] = {
-            "x": round(top_x, 4),
-            "y": round(top_y, 4),
-            "width": round(tw, 4),
-            "height": round(th, 4),
-        }
-    
-    # 侧视图在主视右侧（上面已选定）
-    if side_view:
-        sw, sh = scaled[side_view]
-        side_x = main_x + mw + spacing  # 主视右侧
-        side_y = main_y + (mh - sh) / 2  # Y平齐
-        if side_x + sw > sheet_w - margin:
-            return None  # 超出右边界
-        positions[side_view] = {
-            "x": round(side_x, 4),
-            "y": round(side_y, 4),
-            "width": round(sw, 4),
-            "height": round(sh, 4),
-        }
-    
-    # 轴测图左下角；与俯视包围盒相交时改右下角，仍相交则降一档比例
-    if "isometric" in scaled:
-        iw, ih = scaled["isometric"]
-        for iso_x in (margin, sheet_w - margin - iw):
-            positions["isometric"] = {
-                "x": round(iso_x, 4), "y": round(margin, 4),
-                "width": round(iw, 4), "height": round(ih, 4),
-            }
-            if ("top" not in positions or
-                    not _rects_intersect(positions["isometric"], positions["top"])):
-                break
-        else:
-            iso_den = _next_scale_den(scale_den)
-            if iso_den == scale_den:
-                return None
-            factor = scale_den / iso_den
-            iw, ih = iw * factor, ih * factor
-            positions["isometric"] = {
-                "x": round(sheet_w - margin - iw, 4), "y": round(margin, 4),
-                "width": round(iw, 4), "height": round(ih, 4),
-            }
-            if ("top" in positions and
-                    _rects_intersect(positions["isometric"], positions["top"])):
-                return None
-    
-    # 校验所有视图在图幅内
-    for name, pos in positions.items():
-        if (pos["x"] < 0 or pos["y"] < 0 or
-            pos["x"] + pos["width"] > sheet_w or
-            pos["y"] + pos["height"] > sheet_h):
-            return None
-    
-    return positions
-
-
 def _compute_layout_b_m1(
     source_file: str,
     box: Sequence[float],
@@ -345,6 +234,7 @@ def _compute_layout_b_m1(
     sheet_h: float,
     task_id: str,
     warnings: List[str],
+    title_block_bbox: Optional[Tuple[float, float, float, float]] = None,
 ) -> Dict[str, Any]:
     """
     B-M1 完整布局计算：类型识别 → 视图策略 → 比例选择 → 第一角布局
@@ -356,57 +246,60 @@ def _compute_layout_b_m1(
         is_assembly=is_assembly,
         component_count=component_count,
     )
-    
+
     logger.info(
         f"[Task:{task_id}] B-M1 type recognition: {type_result.part_type.value}, "
         f"reason: {type_result.reason}"
     )
-    
+
     # 2. 获取视图策略
     strategy = get_view_strategy(type_result.part_type)
-    
+
     # 3. 计算视图尺寸
     view_sizes = _view_sizes_from_box_b_m1(box, type_result.part_type)
-    
+
     # 4. 选择比例（带重试）
     scale_den = GB_SCALE_RATIOS[-1]  # 默认最小比例
     positions = None
     spacing = strategy.spacing
-    
+    engine = FirstAngleLayoutEngine(
+        sheet_w, sheet_h, spacing, title_block_bbox=title_block_bbox
+    )
+
     for retry in range(_MAX_LAYOUT_RETRIES + 1):
         for den in GB_SCALE_RATIOS:
-            positions = _first_angle_layout_b_m1(
-                view_sizes, den, sheet_w, sheet_h, spacing
-            )
+            positions = engine.layout(view_sizes, den, strategy)
             if positions is not None:
                 scale_den = den
                 break
-        
+
         if positions is not None:
             break
-        
+
         # 重算：减小间距
         if retry < _MAX_LAYOUT_RETRIES:
             spacing = max(20.0, spacing - 5.0)
+            engine.spacing = spacing
             logger.warning(
                 f"[Task:{task_id}] B-M1 layout retry {retry + 1}, "
                 f"spacing={spacing}"
             )
-    
+
     if positions is None:
         logger.error(f"[Task:{task_id}] B-M1 layout failed, using fallback")
         warnings.append("B-M1布局失败，使用回退布局（可能重叠/出界，如实上报）")
         scale_den = GB_SCALE_RATIOS[-1]
-        positions = _first_angle_layout_b_m1(
-            view_sizes, scale_den, 1e6, 1e6, spacing
-        ) or {}
-    
+        engine.sheet_w = 1e6
+        engine.sheet_h = 1e6
+        positions = engine.layout(view_sizes, scale_den, strategy) or {}
+
     return {
         "type_info": type_result_to_dict(type_result),
         "view_sizes": view_sizes,
         "scale_den": scale_den,
         "scale": f"1:{scale_den:g}",
         "positions": positions,
+        "strategy_obj": strategy,
         "strategy": {
             "part_type": type_result.part_type.value,
             "views": [v.name.value for v in strategy.views],
@@ -778,6 +671,9 @@ def create_drawing_sync(
             sheet_w, sheet_h = SHEET_A3_WIDTH, SHEET_A3_HEIGHT
         sheet = _sheet_name_of(sheet_w, sheet_h)
 
+        # 1d) 实测标题栏禁放区（一次传入布局引擎）
+        title_block_bbox = measure_title_block_rect(drw, sheet_w, sheet_h)
+
         # 2) B-M1 布局计算
         if use_b_m1 and box:
             # B-M1 布局计算
@@ -790,14 +686,16 @@ def create_drawing_sync(
                 sheet_h=sheet_h,
                 task_id=task_id,
                 warnings=warnings,
+                title_block_bbox=title_block_bbox,
             )
-            
+
             type_info = layout_result["type_info"]
             view_sizes_data = layout_result["view_sizes"]
             den = layout_result["scale_den"]
             positions = layout_result["positions"]
+            strategy = layout_result["strategy_obj"]
             actual_view_names = list(positions.keys()) if positions else ["front"]
-            
+
             logger.info(
                 f"[Task:{task_id}] B-M1 layout: type={type_info['type']}, "
                 f"scale=1:{den}, views={actual_view_names}"
@@ -816,10 +714,11 @@ def create_drawing_sync(
                 }
             else:
                 view_sizes_data = {}
-            
+
             actual_view_names = list(view_names) if view_names else ["front", "top", "left"]
             den = 10.0
             positions = None
+            strategy = get_view_strategy(PartType.PLATE)
         inserted: Dict[str, Any] = {}
         for view_name in actual_view_names:
             # 获取SW视图名（中英文）
@@ -900,8 +799,10 @@ def create_drawing_sync(
                 for n, o in outlines0.items()
             }
             den0 = den
-            den = _pick_scale_measured_impl(measured_sizes, den0, sheet_w,
-                                            sheet_h, task_id, warnings)
+            den = _pick_scale_measured_impl(
+                measured_sizes, den0, sheet_w, sheet_h, task_id, warnings,
+                strategy=strategy, title_block_bbox=title_block_bbox,
+            )
             if abs(den - den0) > 1e-9:
                 logger.info(f"[Task:{task_id}] scale re-picked by measured "
                             f"outlines: 1:{den0:g} -> 1:{den:g}")
@@ -914,33 +815,36 @@ def create_drawing_sync(
                     n: ((o[2] - o[0]) * 1000.0, (o[3] - o[1]) * 1000.0)
                     for n, o in outlines0.items()
                 }
-            # 轴测图比主视小一档（LB26 参考图：主视 1:30 / 轴测 1:40），
-            # 避免轴测对角棒与正投影视图争位
-            if "isometric" in inserted:
-                iso_den = _next_scale_den(den)
-                if abs(iso_den - den) > 1e-9:
-                    _set_view_scale(inserted["isometric"], iso_den,
-                                    "isometric", warnings)
-                    drw.ForceRebuild3(True)
-                    outlines0 = _measure_outlines(inserted,
-                                                  list(inserted.keys()), task_id)
-                    measured_sizes = {
-                        n: ((o[2] - o[0]) * 1000.0, (o[3] - o[1]) * 1000.0)
-                        for n, o in outlines0.items()
-                    }
-            positions = _first_angle_layout_b_m1(
-                measured_sizes, 1.0, sheet_w, sheet_h, LAYOUT_GAP_DEFAULT)
-            if positions is None:
+            # 5b-2) 用新布局引擎按实测轮廓重排（传入 SW 视图对象走实测流程）
+            engine = FirstAngleLayoutEngine(
+                sheet_w, sheet_h, strategy.spacing,
+                title_block_bbox=title_block_bbox,
+            )
+            try:
+                # 将图纸尺寸还原为模型尺寸（引擎按 scale_den 缩放）
+                model_sizes = {
+                    n: (w * den, h * den)
+                    for n, (w, h) in measured_sizes.items()
+                }
+                positions = engine.layout(
+                    model_sizes, den, strategy,
+                    view_objects=inserted, drawing=drw,
+                )
+                iso_den = den
+                # 引擎内部可能因压标题栏而调小轴测比例，回读实际值
+                if "isometric" in inserted:
+                    try:
+                        iso_den = round(1.0 / float(inserted["isometric"].ScaleDecimal))
+                    except Exception:
+                        pass
+            except SWException:
                 # 逃生口修复：按 GB 比例序列继续往小比例降档重试
                 seq = list(GB_SCALE_RATIOS)
                 start = seq.index(den) if den in seq else 0
+                positions = None
                 for try_den in seq[start + 1:]:
                     for name, view in inserted.items():
                         _set_view_scale(view, try_den, name, warnings)
-                    iso_try = _next_scale_den(try_den)
-                    if "isometric" in inserted and iso_try != try_den:
-                        _set_view_scale(inserted["isometric"], iso_try,
-                                        "isometric", warnings)
                     drw.ForceRebuild3(True)
                     outlines0 = _measure_outlines(inserted,
                                                   list(inserted.keys()), task_id)
@@ -948,14 +852,27 @@ def create_drawing_sync(
                         n: ((o[2] - o[0]) * 1000.0, (o[3] - o[1]) * 1000.0)
                         for n, o in outlines0.items()
                     }
-                    positions = _first_angle_layout_b_m1(
-                        measured_sizes, 1.0, sheet_w, sheet_h,
-                        LAYOUT_GAP_DEFAULT)
-                    if positions is not None:
-                        den, iso_den = try_den, iso_try
+                    model_sizes = {
+                        n: (w * try_den, h * try_den)
+                        for n, (w, h) in measured_sizes.items()
+                    }
+                    try:
+                        positions = engine.layout(
+                            model_sizes, try_den, strategy,
+                            view_objects=inserted, drawing=drw,
+                        )
+                        den = try_den
+                        iso_den = try_den
+                        if "isometric" in inserted:
+                            try:
+                                iso_den = round(1.0 / float(inserted["isometric"].ScaleDecimal))
+                            except Exception:
+                                pass
                         logger.info(f"[Task:{task_id}] measured layout "
                                     f"fallback OK: 1:{den:g}")
                         break
+                    except SWException:
+                        continue
                 if positions is None:
                     warnings.append(
                         f"实测轮廓在最小比例 1:{GB_SCALE_RATIOS[-1]:g} 仍超出 "

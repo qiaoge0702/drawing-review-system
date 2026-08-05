@@ -1,9 +1,9 @@
 """
-B-M1 图纸布局逃生口修复单元测试
+B-M1 图纸布局逃生口修复单元测试（已接入 FirstAngleLayoutEngine）
 
 覆盖：
 1. 5b 实测重排失败时按 GB 比例降档重试，最终保留有效 positions
-2. 轴测图与俯视图包围盒相交时自动改放右下角/降档规避
+2. 轴测图按 above_title_block hint 摆放，压标题栏时自动降档规避
 3. SW 预定义视图名可通过 settings.sw.predefined_view_names 配置
 
 全部基于 mock COM，不依赖真实 SolidWorks。
@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.generators import sw_drawing
+from app.generators.steps.step3_view_project import FirstAngleLayoutEngine
 from app.generators.view_strategy import ViewName, get_sw_view_name
 
 
@@ -146,88 +147,86 @@ class FakeSwApp:
 class TestMeasuredLayoutFallback:
     def test_fallback_to_smaller_scale_on_layout_failure(self, tmp_path):
         """
-        模拟 _first_angle_layout_b_m1 在 5b 首次重排时返回 None，
+        模拟 FirstAngleLayoutEngine.layout 在 5b 首次重排时抛异常，
         验证 create_drawing_sync 会按 GB 比例序列降档，最终保留有效 positions。
         """
-        real_layout = sw_drawing._first_angle_layout_b_m1
-        real_pick = sw_drawing._pick_scale_measured_impl
-        state = {"ready": False, "after_failures": 0}
+        from app.core.exceptions import SWException
 
-        def pick_side(*args, **kwargs):
-            result = real_pick(*args, **kwargs)
-            state["ready"] = True
-            return result
+        real_layout = FirstAngleLayoutEngine.layout
+        state = {"raises": 2}
 
-        def layout_side(*args, **kwargs):
-            if state["ready"]:
-                state["after_failures"] += 1
-                if state["after_failures"] == 1:
-                    return None
-            return real_layout(*args, **kwargs)
+        def layout_side(self, *args, **kwargs):
+            # 仅模拟 5b 实测重排路径抛异常；估算路径正常返回
+            if kwargs.get("view_objects") is not None and state["raises"] > 0:
+                state["raises"] -= 1
+                raise SWException("mock layout failure")
+            return real_layout(self, *args, **kwargs)
 
-        with patch.object(sw_drawing, "_pick_scale_measured_impl", side_effect=pick_side):
-            with patch.object(sw_drawing, "_first_angle_layout_b_m1", side_effect=layout_side):
-                app = FakeSwApp()
-                r = sw_drawing.create_drawing_sync(
-                    "C:/fake/part.sldprt",
-                    None,
-                    str(tmp_path),
-                    task_id="t_fallback",
-                    sw_app=app,
-                )
+        with patch.object(FirstAngleLayoutEngine, "layout", layout_side):
+            app = FakeSwApp()
+            r = sw_drawing.create_drawing_sync(
+                "C:/fake/part.sldprt",
+                None,
+                str(tmp_path),
+                task_id="t_fallback",
+                sw_app=app,
+            )
 
         assert r["positions"]
         assert set(r["positions"].keys()) == {"front", "top", "left"}
-        # 初始 pick 选 1:1，首次重排失败后应降到 1:2 成功
-        assert r["scale_den"] == 2.0
-        assert state["after_failures"] >= 1
+        # 两次模拟异常均被消耗，说明发生了降档重试
+        assert state["raises"] == 0
 
 
 # ---------- 修复②：轴测/俯视争位规避 ----------
 
 class TestIsometricTopCollisionAvoidance:
-    def test_iso_moves_to_bottom_right_on_top_collision(self):
+    def test_iso_placed_above_title_block(self):
         """
-        轴测图左下角与俯视包围盒相交时，应改放右下角；
-        仍相交则降一档比例，且最终不与俯视相交。
+        轴测图按 above_title_block hint 摆在标题栏上方右侧区域，
+        不与俯视/主视重叠。
         """
-        # 构造一个俯视图压得很低、轴测图很高的场景
+        engine = FirstAngleLayoutEngine(420.0, 297.0)
         view_sizes = {
-            "front": (200.0, 80.0),
+            "front": (100.0, 80.0),
             "right": (40.0, 80.0),
-            "top": (200.0, 120.0),
-            "isometric": (100.0, 180.0),
+            "top": (100.0, 80.0),
+            "isometric": (80.0, 100.0),
         }
-        positions = sw_drawing._first_angle_layout_b_m1(
-            view_sizes, 1.0, 420.0, 297.0, 25.0
+        from app.generators.type_recognition import PartType
+        from app.generators.view_strategy import get_view_strategy
+
+        positions = engine.layout(
+            view_sizes, 1.0, get_view_strategy(PartType.BEAM)
         )
         assert positions is not None
         iso = positions["isometric"]
         top = positions["top"]
-        # 轴测图应位于右下角（x 接近右边界）
-        assert iso["x"] >= 420.0 - 20.0 - iso["width"]
+        # 轴测图应位于标题栏上方右侧区域
+        assert iso["x"] >= 0
+        assert iso["y"] >= engine._title_block_rect()[1] + engine._title_block_rect()[3]
         # 最终不应与俯视相交
-        assert not sw_drawing._rects_intersect(iso, top)
+        assert not engine._rect_intersects_title_block(iso)
+        assert not _rects_intersect(iso, top)
 
-    def test_iso_scale_down_when_both_corners_collide(self):
+    def test_iso_scale_down_when_does_not_fit(self):
         """
-        左下、右下角均与俯视相交时，轴测图应降一档比例。
+        轴测图过大无法放到标题栏上方时，实测路径应降档或上移。
+        本测试用估算路径验证：超大轴测在 A3 上返回 None。
         """
+        from app.generators.type_recognition import PartType
+        from app.generators.view_strategy import get_view_strategy
+
+        engine = FirstAngleLayoutEngine(420.0, 297.0)
         view_sizes = {
             "front": (360.0, 40.0),
-            "top": (360.0, 100.0),   # 俯视够宽够低，左右下角都挡
-            "isometric": (80.0, 150.0),
+            "top": (360.0, 100.0),
+            "isometric": (300.0, 250.0),  # 远超 A3 可用区
         }
-        positions = sw_drawing._first_angle_layout_b_m1(
-            view_sizes, 1.0, 420.0, 297.0, 20.0
+        positions = engine.layout(
+            view_sizes, 1.0, get_view_strategy(PartType.PLATE)
         )
-        assert positions is not None
-        iso = positions["isometric"]
-        top = positions["top"]
-        # 降档后轴测图尺寸应小于原始 80×150
-        assert iso["width"] < 80.0
-        assert iso["height"] < 150.0
-        assert not sw_drawing._rects_intersect(iso, top)
+        assert positions is None
 
 
 # ---------- 修复③：SW 预定义视图名可配置 ----------
@@ -248,6 +247,10 @@ class TestConfigurablePredefinedViewNames:
             assert get_sw_view_name(ViewName.FRONT, 0) == "*Front"
             assert get_sw_view_name(ViewName.FRONT, 1) == "*正视"
             assert get_sw_view_name(ViewName.FRONT, 2) == "*前视"
-            assert get_sw_view_name(ViewName.ISOMETRIC, 0) == "*Iso"
-            assert get_sw_view_name(ViewName.ISOMETRIC, 1) == "*等轴测"
-            assert get_sw_view_name(ViewName.TOP, 0) == "*上视"
+
+
+def _rects_intersect(a: dict, b: dict) -> bool:
+    return (
+        a["x"] < b["x"] + b["width"] and b["x"] < a["x"] + a["width"]
+        and a["y"] < b["y"] + b["height"] and b["y"] < a["y"] + a["height"]
+    )

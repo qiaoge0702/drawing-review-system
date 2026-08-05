@@ -135,7 +135,7 @@ VIEW_ISOMETRIC = ViewConfig(
     name=ViewName.ISOMETRIC,
     display_name="轴测图",
     sw_names=SW_PREDEFINED_VIEWS[ViewName.ISOMETRIC],
-    position_hint="bottom_left",   # 左下角
+    position_hint="above_title_block",   # 标题栏上方右侧区域
 )
 
 

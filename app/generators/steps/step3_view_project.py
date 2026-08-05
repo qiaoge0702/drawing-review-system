@@ -71,8 +71,9 @@ _BASE_SHEET = "A3"  # 比例决策基准图幅
 _FIRST_ANGLE_GAP_X = 25.0  # 水平间距（主视-侧视）
 _FIRST_ANGLE_GAP_Y = 25.0  # 垂直间距（主视-俯视）
 
-# BOM 估计（图幅选型用，与 step5 默认值对齐）
-_BOM_BASE_Y = 50.0  # BOM 表底边（标题栏顶）图纸 y
+# 标题栏禁放区：优先从企业模板 .drwdot 的 TitleBlock.GetBoundingBox 实测，
+# 测不到时采用保底高度（mm）
+_TITLE_BLOCK_FALLBACK_HEIGHT = 60.0
 _BOM_HEADER_EST = 20.0
 _BOM_ROW_H_EST = 15.0
 _FRAME_MARGIN = 10.0
@@ -80,114 +81,321 @@ _FRAME_MARGIN = 10.0
 # 最大比例重算次数
 _MAX_SCALE_RETRIES = 3
 
+# Position 锚点修正收敛判据（米）= 0.2mm
+_POS_TOL_M = 2e-4
+
+
+def _next_scale_den(den: float) -> float:
+    """GB 比例系列中 den 的下一档（更小比例）；末档 → 沿用末档"""
+    seq = list(GB_SCALE_RATIOS)
+    try:
+        i = seq.index(den)
+    except ValueError:
+        return den
+    return float(seq[min(i + 1, len(seq) - 1)])
+
+
+def measure_title_block_rect(
+    drawing: Any,
+    sheet_w: float,
+    sheet_h: float,
+    fallback_height: float = _TITLE_BLOCK_FALLBACK_HEIGHT,
+) -> Tuple[float, float, float, float]:
+    """
+    从企业模板 .drwdot 的 TitleBlock.GetBoundingBox 实测标题栏禁放区（mm）。
+    测不到则返回全宽、保底高度的底部禁区，确保任何视图不得进入标题栏区。
+    """
+    try:
+        tb = getattr(drawing, "TitleBlock", None)
+        if tb is None:
+            try:
+                sheet = drawing.GetCurrentSheet()
+                tb = getattr(sheet, "TitleBlock", None)
+            except Exception:
+                tb = None
+        if tb is not None:
+            box = tb.GetBoundingBox()
+            if box and len(box) >= 4:
+                vals = [float(v) * 1000.0 for v in box[:4]]
+                x1, y1, x2, y2 = vals
+                x = min(x1, x2)
+                y = min(y1, y2)
+                w = abs(x2 - x1)
+                h = abs(y2 - y1)
+                if w > 0 and h > 0:
+                    return (x, y, w, h)
+    except Exception:
+        pass
+    return (0.0, 0.0, sheet_w, fallback_height)
+
 
 class FirstAngleLayoutEngine:
     """
     第一角投影布局引擎（B-M1）
-    
-    摆位规则：
-    - 主视中上居中
-    - 右视在主视右侧（间距20-30mm，Y平齐）
-    - 俯视在主视正下方（X对齐，间距20-30mm）
-    - 轴测图左下角（不与其他视图重叠）
+
+    摆位规则由 ViewStrategy.views[].position_hint 驱动：
+    - center_upper：主视中上居中
+    - below_front：主视正下方
+    - right_of_front：主视右侧
+    - above_title_block：标题栏上方右侧区域
     """
-    
+
     def __init__(
         self,
         sheet_width: float,
         sheet_height: float,
         spacing: float = _FIRST_ANGLE_GAP_X,
+        title_block_bbox: Optional[Tuple[float, float, float, float]] = None,
     ):
         self.sheet_w = sheet_width
         self.sheet_h = sheet_height
         self.spacing = spacing
         self.margin = LAYOUT_MARGIN
-    
+        self.title_block_bbox = title_block_bbox
+
     def layout(
         self,
         view_sizes: Dict[str, Tuple[float, float]],
         scale_den: float,
         strategy: ViewStrategy,
+        view_objects: Optional[Dict[str, Any]] = None,
+        drawing: Optional[Any] = None,
+        max_rearrange: int = 2,
     ) -> Optional[Dict[str, Any]]:
         """
-        计算第一角投影布局
-        
-        Args:
-            view_sizes: 视图未缩放尺寸 {name: (width, height)}
-            scale_den: 比例分母
-            strategy: 视图策略
-        
-        Returns:
-            各视图位置，或None（超出图幅）
+        按 ViewConfig.position_hint 计算第一角投影布局。
+
+        若传入 view_objects（已插入的 SW 视图对象），则：
+        1. 按 hint 计算理想位置；
+        2. 设置 Position；
+        3. GetOutline 实测轮廓并修正 Position 锚点；
+        4. 校验标题栏禁放区与图幅边界；
+        5. 若压标题栏，优先缩小轴测比例或整体上移；
+        6. 超过 max_rearrange 次仍未解决 → 抛出 SWException（禁止静默）。
+
+        未传入 view_objects 时退化为纯几何估算，超限返回 None。
         """
-        # 按比例缩放
-        scaled = {
+        scaled: Dict[str, Tuple[float, float]] = {
             name: (w / scale_den, h / scale_den)
             for name, (w, h) in view_sizes.items()
         }
-        
-        positions: Dict[str, Any] = {}
-        
-        # 确定主视图：front/left/right 中最宽者（长梁类长视图作主视，
-        # 对照 LB26.00000 参考图主视占图幅宽 ~60%）；缺省取首个
+
+        positions = self._compute_ideal_positions(scaled, strategy)
+        if positions is None:
+            return None
+
+        if not view_objects:
+            if not self._validate_positions(positions):
+                return None
+            return positions
+
+        # ---- 实测驱动路径 ----
+        iso_den = scale_den
+        self._apply_positions_and_correct(view_objects, positions, drawing)
+        measured = self._measure_positions(view_objects, positions)
+
+        if self._validate_positions(measured):
+            return measured
+
+        # 重排：优先缩小轴测比例或上移
+        for _ in range(max_rearrange):
+            adjusted = False
+
+            if "isometric" in view_objects and "isometric" in positions:
+                iso_pos = measured["isometric"]
+                tb = self._title_block_rect()
+                tb_top = tb[1] + tb[3]
+
+                # 冲突来源：压标题栏或越下边界
+                if (
+                    self._rect_intersects_title_block(iso_pos)
+                    or iso_pos["y"] < tb_top + self.margin
+                ):
+                    new_iso_den = _next_scale_den(iso_den)
+                    if new_iso_den != iso_den:
+                        self._set_view_scale(
+                            view_objects["isometric"], new_iso_den
+                        )
+                        iso_den = new_iso_den
+                        scaled["isometric"] = (
+                            view_sizes["isometric"][0] / iso_den,
+                            view_sizes["isometric"][1] / iso_den,
+                        )
+                        adjusted = True
+                    else:
+                        # 已无更小比例，尝试整体上移
+                        shift = (
+                            tb_top + self.margin
+                            - positions["isometric"]["y"]
+                        )
+                        if shift > 0:
+                            positions["isometric"]["y"] += shift
+                            if (
+                                positions["isometric"]["y"]
+                                + positions["isometric"]["height"]
+                                > self.sheet_h - self.margin
+                            ):
+                                raise SWException(
+                                    "Isometric view cannot fit above title block "
+                                    "after rearrangement",
+                                    error_code=ErrorCode.GEN_STEP_FAILED,
+                                )
+                            adjusted = True
+                elif iso_pos["y"] < self.margin:
+                    # 非标题栏导致的下边界冲突，尝试上移
+                    shift = self.margin - iso_pos["y"]
+                    positions["isometric"]["y"] += shift
+                    adjusted = True
+
+            if adjusted:
+                # 比例变化后需要重新计算所有理想位置
+                positions = self._compute_ideal_positions(scaled, strategy)
+                if positions is None:
+                    raise SWException(
+                        "Layout recomputation failed during rearrangement",
+                        error_code=ErrorCode.GEN_STEP_FAILED,
+                    )
+                self._apply_positions_and_correct(
+                    view_objects, positions, drawing
+                )
+                measured = self._measure_positions(view_objects, positions)
+                if self._validate_positions(measured):
+                    return measured
+            else:
+                break
+
+        raise SWException(
+            "Layout violates title block or sheet boundary after "
+            f"{max_rearrange} rearrangement attempts",
+            error_code=ErrorCode.GEN_STEP_FAILED,
+        )
+
+    def _compute_ideal_positions(
+        self,
+        scaled: Dict[str, Tuple[float, float]],
+        strategy: ViewStrategy,
+    ) -> Optional[Dict[str, Any]]:
+        """按 position_hint 计算各视图理想位置"""
+        hints = {v.name.value: v.position_hint for v in strategy.views}
+
         main_view = self._find_main_view(scaled)
         if not main_view:
             return None
-        
-        # 主视居中偏上：有侧视时按 主视+间距+侧视 整组水平居中（老板
-        # 2026-08-03 验收：单主视居中会把侧视挤出右边界 → 被迫缩小比例）
-        mw, mh = scaled[main_view]
-        side_view = None
-        for _cand in ("front", "right", "left"):
-            if _cand in scaled and _cand != main_view:
-                side_view = _cand
-                break
-        side_w = scaled[side_view][0] if side_view else 0.0
-        group_w = mw + (self.spacing + side_w if side_view else 0.0)
-        main_x = (self.sheet_w - group_w) / 2  # 整组水平居中
-        main_y = self.sheet_h - self.margin - mh  # 居中偏上
-        positions[main_view] = self._make_pos(main_x, main_y, mw, mh)
-        
-        # 俯视图在主视正下方
-        if "top" in scaled:
-            tw, th = scaled["top"]
-            top_x = main_x  # X对齐主视
-            top_y = main_y - self.spacing - th  # 主视正下方
-            if top_y < self.margin:
-                return None  # 超出下边界
-            positions["top"] = self._make_pos(top_x, top_y, tw, th)
-        
-        # 侧视图在主视右侧（上面已选定）
-        if side_view:
-            sw, sh = scaled[side_view]
-            side_x = main_x + mw + self.spacing  # 主视右侧
-            # Y平齐：视图中心对齐
-            side_y = main_y + (mh - sh) / 2
-            if side_x + sw > self.sheet_w - self.margin:
-                return None  # 超出右边界
-            positions[side_view] = self._make_pos(side_x, side_y, sw, sh)
-        
-        # 轴测图左下角。轴测为斜置实体，包围盒与正投影视图相交属常态
-        # （LB26 参考图轴测包围盒同样与俯视相交）——固定左下角，
-        # 重叠由最终实测检查如实 warning
-        if "isometric" in scaled:
-            iw, ih = scaled["isometric"]
-            positions["isometric"] = self._make_pos(
-                self.margin, self.margin, iw, ih)
-        
-        # 校验所有视图在图幅内
-        if not self._validate_positions(positions):
-            return None
-        
+
+        positions: Dict[str, Any] = {}
+
+        # 动态校正 hint：主视一定居中；其余前/左/右视图若策略给 center_upper，
+        # 说明它实际应作为侧视摆在主视右侧，避免与主视重叠。
+        def _effective_hint(view_name: str, hint: str) -> str:
+            if view_name == main_view:
+                return "center_upper"
+            if hint == "center_upper" and view_name in ("front", "left", "right"):
+                return "right_of_front"
+            return hint
+
+        # 主视优先摆位
+        positions[main_view] = self._place_by_hint(
+            main_view,
+            scaled[main_view],
+            "center_upper",
+            positions,
+            main_view=main_view,
+        )
+
+        # 按 strategy 声明顺序摆其余视图
+        for vc in strategy.views:
+            name = vc.name.value
+            if name == main_view or name not in scaled:
+                continue
+            positions[name] = self._place_by_hint(
+                name, scaled[name], _effective_hint(name, vc.position_hint),
+                positions, main_view=main_view,
+            )
+
+        # strategy 中未声明的视图兜底居中偏上
+        for name, size in scaled.items():
+            if name in positions:
+                continue
+            positions[name] = self._place_by_hint(
+                name, size, _effective_hint(name, hints.get(name, "center_upper")),
+                positions, main_view=main_view,
+            )
+
         return positions
-    
-    def _find_main_view(self, scaled: Dict[str, Tuple[float, float]]) -> Optional[str]:
+
+    def _place_by_hint(
+        self,
+        name: str,
+        size: Tuple[float, float],
+        hint: str,
+        positions: Dict[str, Any],
+        main_view: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """按 hint 摆放单个视图；below_front/right_of_front 以主视（main_view）为基准"""
+        w, h = size
+
+        def _anchor():
+            if main_view and main_view in positions:
+                return positions[main_view]
+            return positions.get("front")
+
+        if hint == "center_upper":
+            x = (self.sheet_w - w) / 2.0
+            y = self.sheet_h - self.margin - h
+        elif hint == "below_front":
+            front = _anchor()
+            if front:
+                x = front["x"]
+                y = front["y"] - self.spacing - h
+            else:
+                x = (self.sheet_w - w) / 2.0
+                y = self.sheet_h - self.margin - h
+        elif hint == "right_of_front":
+            front = _anchor()
+            if front:
+                x = front["x"] + front["width"] + self.spacing
+                y = front["y"] + (front["height"] - h) / 2.0
+            else:
+                x = self.sheet_w - self.margin - w
+                y = self.sheet_h - self.margin - h
+        elif hint == "above_title_block":
+            tb = self._title_block_rect()
+            x = self.sheet_w - self.margin - w
+            y = self.sheet_h - self.margin - h
+            # 若进入标题栏区，则坐到标题栏上方
+            if y < tb[1] + tb[3] + self.margin:
+                y = tb[1] + tb[3] + self.margin
+            # 若仍顶出图框，保持顶部贴边（由后续校验决定是否接受）
+            if y + h > self.sheet_h - self.margin:
+                y = self.sheet_h - self.margin - h
+        else:
+            x = (self.sheet_w - w) / 2.0
+            y = self.sheet_h - self.margin - h
+
+        return self._make_pos(x, y, w, h)
+
+    def _title_block_rect(self) -> Tuple[float, float, float, float]:
+        """返回标题栏禁放区 (x, y, w, h)，未提供则使用全宽保底高度"""
+        if self.title_block_bbox is not None:
+            return self.title_block_bbox
+        return (0.0, 0.0, self.sheet_w, _TITLE_BLOCK_FALLBACK_HEIGHT)
+
+    def _rect_intersects_title_block(self, pos: Dict[str, Any]) -> bool:
+        """判断视图矩形是否与标题栏禁放区相交"""
+        return self._is_overlap(
+            (pos["x"], pos["y"], pos["width"], pos["height"]),
+            self._title_block_rect(),
+        )
+
+    def _find_main_view(
+        self, scaled: Dict[str, Tuple[float, float]]
+    ) -> Optional[str]:
         """确定主视图名称：front/left/right 中最宽者（长梁类长视图作主视）"""
         candidates = [n for n in ("front", "left", "right") if n in scaled]
         if candidates:
             return max(candidates, key=lambda n: scaled[n][0])
         return next(iter(scaled.keys())) if scaled else None
-    
+
     def _make_pos(self, x: float, y: float, w: float, h: float) -> Dict[str, Any]:
         """创建位置字典"""
         return {
@@ -196,7 +404,7 @@ class FirstAngleLayoutEngine:
             "width": round(w, 4),
             "height": round(h, 4),
         }
-    
+
     def _is_overlap(
         self,
         rect1: Tuple[float, float, float, float],
@@ -209,9 +417,9 @@ class FirstAngleLayoutEngine:
             x1 < x2 + w2 and x1 + w1 > x2 and
             y1 < y2 + h2 and y1 + h1 > y2
         )
-    
+
     def _validate_positions(self, positions: Dict[str, Any]) -> bool:
-        """校验所有视图在图幅内"""
+        """校验所有视图在图幅内且不与标题栏禁放区相交"""
         for name, pos in positions.items():
             if pos["x"] < 0 or pos["y"] < 0:
                 return False
@@ -219,7 +427,116 @@ class FirstAngleLayoutEngine:
                 return False
             if pos["y"] + pos["height"] > self.sheet_h:
                 return False
+            if self._rect_intersects_title_block(pos):
+                return False
         return True
+
+    def _set_view_scale(self, view: Any, den: float) -> None:
+        """设置视图比例（ScaleDecimal = 1/den）"""
+        try:
+            view.ScaleDecimal = 1.0 / den
+        except Exception:
+            pass
+
+    def _set_view_position(self, view: Any, x_m: float, y_m: float) -> None:
+        """设置视图 Position（米），兼容 VARIANT safearray"""
+        try:
+            import pythoncom
+            import win32com.client
+            view.Position = win32com.client.VARIANT(
+                pythoncom.VT_ARRAY | pythoncom.VT_R8, [x_m, y_m]
+            )
+        except Exception:
+            view.Position = [x_m, y_m]
+
+    def _measure_outlines(
+        self,
+        view_objects: Dict[str, Any],
+        names,
+    ) -> Dict[str, Tuple[float, float, float, float]]:
+        """GetOutline 实测轮廓（米）；任一失败 → SWException（禁止静默）"""
+        outlines: Dict[str, Tuple[float, float, float, float]] = {}
+        for name in names:
+            try:
+                outlines[name] = tuple(
+                    float(v) for v in view_objects[name].GetOutline
+                )
+            except Exception as e:
+                raise SWException(
+                    f"Cannot measure view outline for {name}: {e}",
+                    error_code=ErrorCode.GEN_STEP_FAILED,
+                    detail=str(e),
+                )
+        return outlines
+
+    def _apply_positions_and_correct(
+        self,
+        view_objects: Dict[str, Any],
+        positions: Dict[str, Any],
+        drawing: Optional[Any],
+    ) -> None:
+        """设 Position → 重建 → GetOutline 实测 → 按轮廓中心修正锚点"""
+        names = [n for n in positions if n in view_objects]
+
+        for name in names:
+            pos = positions[name]
+            cx_m = (pos["x"] + pos["width"] / 2.0) / 1000.0
+            cy_m = (pos["y"] + pos["height"] / 2.0) / 1000.0
+            self._set_view_position(view_objects[name], cx_m, cy_m)
+
+        if drawing is not None:
+            try:
+                drawing.ForceRebuild3(True)
+            except Exception:
+                pass
+
+        for _ in range(3):
+            max_delta = 0.0
+            outlines = self._measure_outlines(view_objects, names)
+            for name in names:
+                ol = outlines[name]
+                cx_m = (ol[0] + ol[2]) / 2.0
+                cy_m = (ol[1] + ol[3]) / 2.0
+                target = positions[name]
+                tx_m = (target["x"] + target["width"] / 2.0) / 1000.0
+                ty_m = (target["y"] + target["height"] / 2.0) / 1000.0
+                dx = tx_m - cx_m
+                dy = ty_m - cy_m
+                max_delta = max(max_delta, abs(dx), abs(dy))
+                if abs(dx) > _POS_TOL_M or abs(dy) > _POS_TOL_M:
+                    cur = [float(v) for v in view_objects[name].Position]
+                    self._set_view_position(
+                        view_objects[name], cur[0] + dx, cur[1] + dy
+                    )
+            if drawing is not None:
+                try:
+                    drawing.ForceRebuild3(True)
+                except Exception:
+                    pass
+            if max_delta <= _POS_TOL_M:
+                break
+
+    def _measure_positions(
+        self,
+        view_objects: Dict[str, Any],
+        positions: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """以 GetOutline 实测结果（转 mm）作为最终位置，未实测视图保留计算值"""
+        names = [n for n in positions if n in view_objects]
+        outlines = self._measure_outlines(view_objects, names)
+        measured: Dict[str, Any] = {}
+        for name in names:
+            ol = outlines[name]
+            measured[name] = {
+                "x": round(ol[0] * 1000.0, 4),
+                "y": round(ol[1] * 1000.0, 4),
+                "width": round((ol[2] - ol[0]) * 1000.0, 4),
+                "height": round((ol[3] - ol[1]) * 1000.0, 4),
+            }
+        for name, pos in positions.items():
+            if name not in measured:
+                measured[name] = dict(pos)
+        return measured
 
 
 def _compute_layout_with_retry(
@@ -280,10 +597,10 @@ def _select_sheet_by_content(
         if positions is None:
             continue
         
-        # 检查BOM空间
+        # 检查BOM空间（标题栏顶使用保底高度，实测值由调用方传入 title_block_bbox）
         if bom_rows > 0:
             bom_h = _BOM_HEADER_EST + _BOM_ROW_H_EST * bom_rows
-            if _BOM_BASE_Y + bom_h > h - _FRAME_MARGIN:
+            if _TITLE_BLOCK_FALLBACK_HEIGHT + bom_h > h - _FRAME_MARGIN:
                 continue
         
         return name, w, h
