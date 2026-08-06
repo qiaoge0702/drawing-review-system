@@ -70,8 +70,8 @@ class TestFirstAngleLayoutEngine:
         # 在下方（y坐标较小表示偏下）
         assert top["y"] < front["y"]
     
-    def test_right_view_right_of_front(self):
-        """右视图在主视右侧（1:2 比例）"""
+    def test_right_view_left_of_front(self):
+        """右视图在主视左侧（GB 第一角投影，1:2 比例）"""
         engine = FirstAngleLayoutEngine(SHEET_A3_WIDTH, SHEET_A3_HEIGHT, spacing=25.0)
         view_sizes = {"front": (200, 150), "right": (100, 150)}
         
@@ -84,8 +84,8 @@ class TestFirstAngleLayoutEngine:
         front = positions["front"]
         right = positions["right"]
         
-        # 在右侧
-        assert right["x"] > front["x"]
+        # GB 第一角：右视在主视左侧
+        assert right["x"] + right["width"] < front["x"]
     
     def test_isometric_above_title_block(self):
         """轴测图按 above_title_block hint 摆在标题栏上方右侧区域"""
@@ -204,8 +204,8 @@ class TestLB26Layout:
         assert abs(top["x"] - front["x"]) < 5.0
         assert top["y"] < front["y"]
         
-        # 右视在主视右侧
-        assert right["x"] > front["x"] + front["width"] - 5.0
+        # 右视在主视左侧（GB 第一角投影）
+        assert right["x"] + right["width"] < front["x"] + 5.0
 
 
 class TestScaleRetry:

@@ -602,6 +602,143 @@ def _try_insert_view(
     return None
 
 
+# ---- B-M1+ 新增 SW 原生视图 API 封装（2026-08-06）----
+# 参数签名按 SW 官方 API 文档实现；真机行为差异属 B-M1 验收门禁核对项
+# （风险表：CreateDetailViewAt3/CreateSectionViewAt4 真机行为与文档不符 → 真机验证）
+
+# swDetViewStyle_e / swDetCircleShowType_e（2026-08-06 官方文档存档）
+_DET_STYLE_STANDARD = 0
+_DET_CIRCLE_SHOW = 1
+_DETAIL_LABEL_DEFAULT = "A"
+
+# swSectionLabel 默认起始字母
+_SECTION_LABEL_DEFAULT = "A"
+
+
+def create_first_angle_views(
+    drw: Any,
+    model_path: str,
+    warnings: List[str],
+    task_id: str = "",
+) -> bool:
+    """Create1stAngleViews2：按第一角投影（GB）批量建标准三视图。
+
+    真机实证（2026-08-06 probe）：返回值为 bool（True=成功），不是视图数组；
+    视图对象需调用方自行从图纸页枚举。
+
+    Returns:
+        True=成功；False=失败 + 如实 warning，调用方回退逐视图插入路径。
+    """
+    try:
+        ok = drw.Create1stAngleViews2(model_path)
+        if ok:
+            return True
+    except Exception as e:
+        logger.debug(f"[Task:{task_id}] Create1stAngleViews2 failed: {e}")
+    warnings.append(
+        "Create1stAngleViews2 批量建视图失败，回退逐视图插入（如实上报）"
+    )
+    return False
+
+
+def create_detail_view(
+    drw: Any,
+    parent_view: Any,
+    center_x_m: float,
+    center_y_m: float,
+    radius_m: float,
+    pos_x_m: float,
+    pos_y_m: float,
+    scale_ratio: float,
+    warnings: List[str],
+    task_id: str = "",
+    label: str = _DETAIL_LABEL_DEFAULT,
+    full_outline: bool = False,
+) -> Any:
+    """CreateDetailViewAt3：局部放大视图。
+
+    官方签名（2026-08-06 老板查文档）：9 参
+    CreateDetailViewAt3(X, Y, Z, Style, Scale1, Scale2, LabelIn, Showtype, FullOutline)
+    - Style=swDetViewStyle_e（0=STANDARD）；Scale1/Scale2=比例分子/分母
+    - Showtype=swDetCircleShowType_e（1=CIRCLE）；无 ParentView 参数——
+      父视图由选中的草图圆隐含（新建草图自动选中，同剖视线实证）
+
+    Args:
+        center_x_m/center_y_m/radius_m: 放大区域圆（父视图草图坐标，米）
+        pos_x_m/pos_y_m: 放大视图位置（图纸坐标，米）
+        scale_ratio: 放大倍率（如 2.0 = 2:1 → Scale1=2, Scale2=1）
+
+    真机核对项：草图圆坐标系（图纸 vs 父视图草图）。
+    """
+    try:
+        name = _mc(getattr(parent_view, "Name", None)) or ""
+        if name:
+            drw.ActivateView(name)
+        sketch_mgr = drw.SketchManager
+        circle = sketch_mgr.CreateCircleByRadius(center_x_m, center_y_m, 0, radius_m)
+        if circle is None:
+            raise RuntimeError("circle sketch failed")
+        view = drw.CreateDetailViewAt3(
+            pos_x_m, pos_y_m, 0.0,
+            _DET_STYLE_STANDARD, float(scale_ratio), 1.0,
+            label, _DET_CIRCLE_SHOW, full_outline)
+        if view is not None:
+            return view
+    except Exception as e:
+        logger.debug(f"[Task:{task_id}] CreateDetailViewAt3 failed: {e}")
+    warnings.append("局部放大视图创建失败，跳过（如实上报）")
+    return None
+
+
+def create_section_view(
+    drw: Any,
+    parent_view: Any,
+    cut_points_m: List[Tuple[float, float]],
+    pos_x_m: float,
+    pos_y_m: float,
+    warnings: List[str],
+    task_id: str = "",
+    label: str = _SECTION_LABEL_DEFAULT,
+    options: int = 0,
+) -> Any:
+    """CreateSectionViewAt4：剖视视图。
+
+    官方签名（2026-08-06 老板查文档，真机实证通过）：
+    CreateSectionViewAt4(X, Y, Z, SectionLabel:str, Options:int, ExcludedComponents:obj)
+    - Options 位掩码见 swCreateSectionViewAtOptions_e（0=全剖对齐默认；
+      0x4=翻转方向；0x40=排除紧固件；0x10=局部剖）
+    - ExcludedComponents 传 None 可用（真机实证）
+    - 新建草图线自动处于选中态，无需显式 SelectByID2（真机实证）
+
+    Args:
+        cut_points_m: 剖切线折点（父视图草图坐标，米），≥2 个点
+        pos_x_m/pos_y_m: 剖视图画面中心（图纸坐标，米）
+        label: 剖视标记字母（如 "A" → A-A）
+        options: swCreateSectionViewAtOptions_e 位掩码
+    """
+    if len(cut_points_m) < 2:
+        warnings.append("剖切线不足 2 个点，剖视图跳过（如实上报）")
+        return None
+    try:
+        name = _mc(getattr(parent_view, "Name", None)) or ""
+        if name:
+            drw.ActivateView(name)
+        sketch_mgr = drw.SketchManager
+        for (x1, y1), (x2, y2) in zip(cut_points_m, cut_points_m[1:]):
+            seg = sketch_mgr.CreateLine(x1, y1, 0.0, x2, y2, 0.0)
+            if seg is None:
+                raise RuntimeError("section line sketch failed")
+        view = drw.CreateSectionViewAt4(
+            pos_x_m, pos_y_m, 0.0, label, options, None)
+        if view is not None:
+            return view
+    except Exception as e:
+        logger.debug(f"[Task:{task_id}] CreateSectionViewAt4 failed: {e}")
+    warnings.append("剖视视图创建失败，跳过（如实上报）")
+    return None
+
+
+
 def create_drawing_sync(
     source_file: str,
     view_names: Optional[Sequence[str]] = None,

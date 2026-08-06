@@ -53,6 +53,11 @@ from app.generators.view_strategy import (
     SHEET_A3_HEIGHT,
     LAYOUT_MARGIN,
     LAYOUT_GAP_DEFAULT,
+    resolve_scale_denominator,
+)
+from app.generators.layout import (
+    LayoutEngine as _PureLayoutEngine,
+    LayoutView as _LayoutView,
 )
 
 logger = logging.getLogger(__name__)
@@ -275,104 +280,56 @@ class FirstAngleLayoutEngine:
         scaled: Dict[str, Tuple[float, float]],
         strategy: ViewStrategy,
     ) -> Optional[Dict[str, Any]]:
-        """按 position_hint 计算各视图理想位置"""
-        hints = {v.name.value: v.position_hint for v in strategy.views}
+        """委托纯几何布局引擎（app.generators.layout）计算理想位置。
 
-        main_view = self._find_main_view(scaled)
-        if not main_view:
-            return None
+        多比例并存：各视图按自身 scale 字段（resolve_scale_denominator）
+        相对主比例修正尺寸；positions 键保持视图名（下游契约不变）。
+        """
+        views: List[_LayoutView] = []
+        by_name = {vc.name.value: vc for vc in strategy.views}
+        for name, (w, h) in scaled.items():
+            vc = by_name.get(name)
+            if vc is not None:
+                # 多比例：主比例尺寸 × (主分母 / 本分母)
+                per_den = resolve_scale_denominator(vc.scale, 1.0)
+                factor = 1.0 / per_den if per_den > 0 else 1.0
+                parent_name = None
+                if vc.parent_id:
+                    parent_vc = next(
+                        (c for c in strategy.views if c.id == vc.parent_id), None
+                    )
+                    parent_name = parent_vc.name.value if parent_vc else None
+                views.append(_LayoutView(
+                    id=name,
+                    name=name,
+                    view_type=vc.view_type.value,
+                    width=w * factor,
+                    height=h * factor,
+                    position_mode=vc.position_mode,
+                    position_hint=vc.position_hint,
+                    position_params=dict(vc.position_params),
+                    parent_id=parent_name,
+                ))
+            else:
+                # strategy 未声明的视图兜底：isometric 按轴测，其余按标准视图
+                views.append(_LayoutView(
+                    id=name,
+                    name=name,
+                    view_type="isometric" if name == "isometric" else "standard",
+                    width=w,
+                    height=h,
+                ))
 
-        positions: Dict[str, Any] = {}
-
-        # 动态校正 hint：主视一定居中；其余前/左/右视图若策略给 center_upper，
-        # 说明它实际应作为侧视摆在主视右侧，避免与主视重叠。
-        def _effective_hint(view_name: str, hint: str) -> str:
-            if view_name == main_view:
-                return "center_upper"
-            if hint == "center_upper" and view_name in ("front", "left", "right"):
-                return "right_of_front"
-            return hint
-
-        # 主视优先摆位
-        positions[main_view] = self._place_by_hint(
-            main_view,
-            scaled[main_view],
-            "center_upper",
-            positions,
-            main_view=main_view,
+        engine = _PureLayoutEngine(
+            self.sheet_w,
+            self.sheet_h,
+            spacing=self.spacing,
+            margin=self.margin,
+            title_block_bbox=self.title_block_bbox,
+            projection_type=getattr(strategy, "projection_type", "first_angle"),
+            layout_mode=getattr(strategy, "layout_mode", "auto"),
         )
-
-        # 按 strategy 声明顺序摆其余视图
-        for vc in strategy.views:
-            name = vc.name.value
-            if name == main_view or name not in scaled:
-                continue
-            positions[name] = self._place_by_hint(
-                name, scaled[name], _effective_hint(name, vc.position_hint),
-                positions, main_view=main_view,
-            )
-
-        # strategy 中未声明的视图兜底居中偏上
-        for name, size in scaled.items():
-            if name in positions:
-                continue
-            positions[name] = self._place_by_hint(
-                name, size, _effective_hint(name, hints.get(name, "center_upper")),
-                positions, main_view=main_view,
-            )
-
-        return positions
-
-    def _place_by_hint(
-        self,
-        name: str,
-        size: Tuple[float, float],
-        hint: str,
-        positions: Dict[str, Any],
-        main_view: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """按 hint 摆放单个视图；below_front/right_of_front 以主视（main_view）为基准"""
-        w, h = size
-
-        def _anchor():
-            if main_view and main_view in positions:
-                return positions[main_view]
-            return positions.get("front")
-
-        if hint == "center_upper":
-            x = (self.sheet_w - w) / 2.0
-            y = self.sheet_h - self.margin - h
-        elif hint == "below_front":
-            front = _anchor()
-            if front:
-                x = front["x"]
-                y = front["y"] - self.spacing - h
-            else:
-                x = (self.sheet_w - w) / 2.0
-                y = self.sheet_h - self.margin - h
-        elif hint == "right_of_front":
-            front = _anchor()
-            if front:
-                x = front["x"] + front["width"] + self.spacing
-                y = front["y"] + (front["height"] - h) / 2.0
-            else:
-                x = self.sheet_w - self.margin - w
-                y = self.sheet_h - self.margin - h
-        elif hint == "above_title_block":
-            tb = self._title_block_rect()
-            x = self.sheet_w - self.margin - w
-            y = self.sheet_h - self.margin - h
-            # 若进入标题栏区，则坐到标题栏上方
-            if y < tb[1] + tb[3] + self.margin:
-                y = tb[1] + tb[3] + self.margin
-            # 若仍顶出图框，保持顶部贴边（由后续校验决定是否接受）
-            if y + h > self.sheet_h - self.margin:
-                y = self.sheet_h - self.margin - h
-        else:
-            x = (self.sheet_w - w) / 2.0
-            y = self.sheet_h - self.margin - h
-
-        return self._make_pos(x, y, w, h)
+        return engine.layout(views)
 
     def _title_block_rect(self) -> Tuple[float, float, float, float]:
         """返回标题栏禁放区 (x, y, w, h)，未提供则使用全宽保底高度"""
