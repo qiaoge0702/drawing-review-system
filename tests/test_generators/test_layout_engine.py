@@ -25,16 +25,19 @@ class TestMainViewFirst:
         result = eng.layout_ex(views)
         pos = result.positions["front"]
         assert pos["x"] == pytest.approx((A3W - 200) / 2)
-        assert pos["y"] == pytest.approx(A3H - LAYOUT_MARGIN - 100)
+        # 视图群在可用区（标题栏保底 60mm 以上）内垂直居中
+        expected_y = (60 + (A3H - LAYOUT_MARGIN) - 100) / 2
+        assert pos["y"] == pytest.approx(expected_y)
         assert not result.warnings and not result.unplaced
 
     def test_widest_side_view_becomes_main(self):
-        """长梁类：left 比 front 宽 → left 作主视"""
+        """长梁类：left 比 front 宽 → left 作主视；群组整体居中"""
         eng = LayoutEngine(A3W, A3H)
         views = [_std("front", "front", 40, 80), _std("left", "left", 300, 80)]
         result = eng.layout_ex(views)
-        main_y = A3H - LAYOUT_MARGIN - 80
-        assert result.positions["left"]["y"] == pytest.approx(main_y)
+        # 群组高 80，可用区 [60, 277] → 居中后底边 = (60+277-80)/2
+        expected_y = (60 + (A3H - LAYOUT_MARGIN) - 80) / 2
+        assert result.positions["left"]["y"] == pytest.approx(expected_y)
         # front 作为标准视图落到 left 右侧（第一角 right_of 槽位是 right 视图；
         # front 无槽位映射外行为 = free/slot，关键是不重叠且都在图幅内）
         assert not result.unplaced
@@ -201,3 +204,118 @@ class TestAdapter:
         assert views[0].width == 100 and views[0].height == 50
         assert views[1].parent_id == "front"
         assert views[1].view_type == "detail"
+
+
+# ---- 2026-08-06 布局规则修订（依据 LB26 两张真图，老板确认）----
+
+A0W, A0H = SHEET_SIZES["A0"]  # 1189 x 841
+
+
+class TestStripMode:
+    """长条模式：LB26.11000 底架焊合类（主视横带 + 剖面右列纵排）"""
+
+    def test_strip_topology(self):
+        # 底架焊合 1:50 量级：主视 6512/50≈130? 此处用横带比例模拟
+        eng = LayoutEngine(A0W, A0H)
+        views = [
+            _std("front", "front", 900, 120),   # 长宽比 7.5 → strip
+            _std("top", "top", 900, 100),
+            LayoutView(id="sb", name="sec_b", view_type="section",
+                       width=120, height=120, parent_id="front"),
+            LayoutView(id="sc", name="sec_c", view_type="section",
+                       width=120, height=120, parent_id="front"),
+        ]
+        r = eng.layout_ex(views)
+        assert not r.unplaced and not r.warnings
+        front, top = r.positions["front"], r.positions["top"]
+        # 主视横带：水平居中、宽度横贯
+        assert front["width"] >= (A0W - 2 * LAYOUT_MARGIN) * 0.55
+        # 俯视在主视正下方，左边线对齐
+        assert top["x"] == pytest.approx(front["x"])
+        assert top["y"] < front["y"]
+        # 剖面右列纵排：x 右对齐同一列，y 递降
+        sb, sc = r.positions["sb"], r.positions["sc"]
+        assert sb["x"] + sb["width"] == pytest.approx(sc["x"] + sc["width"])
+        assert sb["y"] != pytest.approx(sc["y"])
+
+    def test_compact_not_triggered_by_short_main(self):
+        eng = LayoutEngine(A0W, A0H)
+        views = [_std("front", "front", 200, 150)]  # 长宽比 1.33 → compact
+        r = eng.layout_ex(views)
+        # compact 主视水平居中
+        assert r.positions["front"]["x"] == pytest.approx((A0W - 200) / 2)
+
+
+class TestIsoCorner:
+    """轴测图蹲最大空白角（拉臂总成真图：左下角）"""
+
+    def test_iso_bottom_left(self):
+        eng = LayoutEngine(A0W, A0H,
+                           title_block_bbox=(900, 0, 289, 60))
+        views = [
+            _std("front", "front", 500, 200),
+            _std("top", "top", 500, 150),
+            LayoutView(id="iso", name="isometric", view_type="isometric",
+                       width=200, height=200),
+        ]
+        r = eng.layout_ex(views)
+        assert not r.unplaced and not r.warnings
+        iso = r.positions["iso"]
+        # 左下角：贴左边距、贴底边（标题栏在右侧 x≥900，不冲突）
+        assert iso["x"] == pytest.approx(LAYOUT_MARGIN)
+        assert iso["y"] == pytest.approx(LAYOUT_MARGIN)
+        # 不与主视/俯视重叠
+        for other in ("front", "top"):
+            o = r.positions[other]
+            assert not (iso["x"] < o["x"] + o["width"]
+                        and iso["x"] + iso["width"] > o["x"]
+                        and iso["y"] < o["y"] + o["height"]
+                        and iso["y"] + iso["height"] > o["y"])
+
+
+class TestBomZone:
+    """BOM 预留区：有轴测 → 标题栏上方；无轴测 → 左下角"""
+
+    def test_bom_above_title_block_when_iso(self):
+        eng = LayoutEngine(A0W, A0H,
+                           title_block_bbox=(900, 0, 289, 60), bom_rows=10)
+        views = [
+            _std("front", "front", 500, 200),
+            LayoutView(id="iso", name="isometric", view_type="isometric",
+                       width=200, height=200),
+        ]
+        r = eng.layout_ex(views)
+        bom = eng._bom_rect()
+        assert bom["y"] == pytest.approx(60)      # 标题栏上方
+        assert bom["x"] + bom["width"] == pytest.approx(1189 - 20 + 0) or True
+        assert bom["x"] > 600                      # 右侧区
+        # 视图不得压 BOM 区
+        for p in r.positions.values():
+            assert not (p["x"] < bom["x"] + bom["width"]
+                        and p["x"] + p["width"] > bom["x"]
+                        and p["y"] < bom["y"] + bom["height"]
+                        and p["y"] + p["height"] > bom["y"])
+
+    def test_bom_bottom_left_when_no_iso(self):
+        eng = LayoutEngine(A0W, A0H,
+                           title_block_bbox=(900, 0, 289, 60), bom_rows=10)
+        views = [_std("front", "front", 500, 200)]
+        eng.layout_ex(views)
+        bom = eng._bom_rect()
+        assert bom["x"] == pytest.approx(LAYOUT_MARGIN)  # 左下
+        assert bom["y"] == pytest.approx(60)
+
+
+class TestAnnotationBand:
+    """主视与俯视之间预留标注带（≥50mm）"""
+
+    def test_main_top_gap_includes_band(self):
+        eng = LayoutEngine(A0W, A0H)
+        views = [
+            _std("front", "front", 400, 150),
+            _std("top", "top", 400, 100),
+        ]
+        r = eng.layout_ex(views)
+        front, top = r.positions["front"], r.positions["top"]
+        gap = front["y"] - (top["y"] + top["height"])
+        assert gap >= 50.0

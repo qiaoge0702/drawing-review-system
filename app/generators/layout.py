@@ -31,6 +31,15 @@ LAYOUT_MARGIN = 20.0          # 视图区边距
 LAYOUT_GAP_DEFAULT = 25.0     # 视图默认间距
 TITLE_BLOCK_FALLBACK = 60.0   # 标题栏保底高度（未实测时）
 
+# ---- 布局规则常量（2026-08-06 老板确认，依据 LB26 两张真图）----
+STRIP_ASPECT_RATIO = 4.0      # 主视长宽比 ≥ 此值 → 长条模式（横带拓扑）
+STRIP_MIN_WIDTH_RATIO = 0.55  # 且主视宽 ≥ 可用宽 × 此值才触发长条模式
+ANNOTATION_BAND = 50.0        # 主视邻接标注带（主视与俯视/侧视之间的尺寸占位）
+BOM_ROW_HEIGHT = 8.0          # BOM 单行高（mm，预估）
+BOM_HEADER_HEIGHT = 10.0      # BOM 表头高（mm，预估）
+BOM_DEFAULT_WIDTH = 280.0     # BOM 预估宽度（mm）
+ISO_CORNER_ORDER = ("bottom_left", "top_right", "top_left")  # 轴测图角落候选序（避开标题栏）
+
 # 第一角投影（GB）：视图名 → 相对主视方位
 _FIRST_ANGLE_SLOT = {
     "front": "main",
@@ -91,6 +100,8 @@ class LayoutEngine:
         title_block_bbox: Optional[Tuple[float, float, float, float]] = None,
         projection_type: str = "first_angle",
         layout_mode: str = "auto",
+        bom_rows: int = 0,
+        bom_width: float = BOM_DEFAULT_WIDTH,
     ) -> None:
         self.sheet_w = sheet_w
         self.sheet_h = sheet_h
@@ -99,6 +110,8 @@ class LayoutEngine:
         self.title_block_bbox = title_block_bbox
         self.projection_type = projection_type
         self.layout_mode = layout_mode
+        self.bom_rows = max(0, bom_rows)
+        self.bom_width = bom_width
 
     # ---- 公共入口 ----
 
@@ -113,8 +126,10 @@ class LayoutEngine:
         """完整布局：absolute 强制落位（违例仅告警），auto/hint 约束布局，放不下进 unplaced"""
         result = LayoutResult()
         by_id = {v.id: v for v in views}
+        self._by_id = by_id
 
         # 1. absolute 视图先行（人工干预优先，不挪位，违例仅告警）
+        self._has_iso = any(v.view_type == "isometric" for v in views)
         for v in views:
             if v.position_mode != "absolute":
                 continue
@@ -142,15 +157,55 @@ class LayoutEngine:
         if main is None:
             result.warnings.append("无视图可布局")
             return result
+        auto_views = [v for v in views if v.id not in result.positions]
+        if self._is_strip_mode(main):
+            self._layout_strip(auto_views, slot_map, result)
+            if result.unplaced:
+                # 长条拓扑放不下 → 回退紧凑模式（防小图幅误触发）
+                for vid in list(result.positions):
+                    if by_id[vid].position_mode != "absolute":
+                        del result.positions[vid]
+                result.unplaced.clear()
+                self._layout_compact(auto_views, slot_map, result)
+        else:
+            self._layout_compact(auto_views, slot_map, result)
+
+        # 6. 全局校验（absolute 已告警过的不重复）
+        for vid, pos in result.positions.items():
+            if by_id[vid].position_mode != "absolute":
+                self._collect_violations(vid, pos, result.positions, result.warnings,
+                                         skip_id=vid)
+
+        # 7. 视图群整体居中（有 absolute 人工干预时跳过，尊重指定坐标）
+        if not any(v.position_mode == "absolute" for v in views):
+            self._center_group(result)
+        return result
+
+    # ---- 模式判定 ----
+
+    def _is_strip_mode(self, main: LayoutView) -> bool:
+        """长条模式：主视长宽比 ≥ 阈值且横贯大部分图幅（梁类横带拓扑）"""
+        if main.height <= 0:
+            return False
+        usable_w = self.sheet_w - 2 * self.margin
+        return (main.width / main.height >= STRIP_ASPECT_RATIO
+                and main.width >= usable_w * STRIP_MIN_WIDTH_RATIO)
+
+    # ---- 拓扑：紧凑模式（原槽位逻辑） ----
+
+    def _layout_compact(
+        self,
+        views: List[LayoutView],
+        slot_map: Dict[str, str],
+        result: LayoutResult,
+    ) -> None:
+        main = self._find_main_view(views)
+        if main is None:
+            result.warnings.append("无视图可布局")
+            return
         if main.id not in result.positions:
-            above_h = max(
-                (v.height for v in views
-                 if v.id not in result.positions
-                 and v.view_type == "standard"
-                 and slot_map.get(v.name) == "above"),
-                default=None,
-            )
-            result.positions[main.id] = self._place_main(main, above_h)
+            result.positions[main.id] = self._place_main_reserved(
+                main, views, slot_map, result)
         main_pos = result.positions[main.id]
         for v in views:
             if v.id in result.positions or v.view_type != "standard":
@@ -162,18 +217,133 @@ class LayoutEngine:
             else:
                 result.positions[v.id] = pos
 
-        # 4. 轴测图：右上空白区
+        self._place_isometrics(views, result)
+        self._place_auxiliaries(views, result, main_pos)
+
+    # ---- 拓扑：长条模式（梁类横带，依据 LB26.11000 底架焊合真图） ----
+
+    def _layout_strip(
+        self,
+        views: List[LayoutView],
+        slot_map: Dict[str, str],
+        result: LayoutResult,
+    ) -> None:
+        """主视横带贴顶居中；俯视正下对齐；侧视/剖面/辅助 → 右侧纵列堆叠"""
+        main = self._find_main_view(views)
+        if main is None:
+            result.warnings.append("无视图可布局")
+            return
+        # 主视：水平居中贴顶
+        main_pos = self._make_pos(
+            (self.sheet_w - main.width) / 2.0,
+            self.sheet_h - self.margin - main.height,
+            main.width, main.height,
+        )
+        result.positions[main.id] = main_pos
+
+        remaining = [v for v in views if v.id not in result.positions]
+        band = max(self.spacing, ANNOTATION_BAND)
+        column: List[LayoutView] = []
+
+        # 俯视/仰视：正下/正上对齐主视左边线（标注带优先，占不下退基础间距）
+        for v in remaining:
+            if v.view_type != "standard":
+                continue
+            slot = slot_map.get(v.name)
+            placed = False
+            for gap in (band, self.spacing):
+                if slot == "below":
+                    pos = self._make_pos(main_pos["x"],
+                                         main_pos["y"] - gap - v.height,
+                                         v.width, v.height)
+                elif slot == "above":
+                    pos = self._make_pos(main_pos["x"],
+                                         main_pos["y"] + main_pos["height"] + gap,
+                                         v.width, v.height)
+                else:
+                    break
+                if self._fits(pos, result.positions):
+                    result.positions[v.id] = pos
+                    placed = True
+                    break
+            if placed:
+                continue
+            if slot in ("below", "above"):
+                column.append(v)  # 正下/正上占不下 → 降入右列纵排
+                continue
+            column.append(v)
+        # 其余（侧视等标准视图）进右侧纵列
+        column.extend(v for v in remaining
+                      if v.view_type == "standard" and v.id not in result.positions
+                      and v not in column)
+
+        self._place_isometrics([v for v in remaining if v.id not in result.positions
+                                and v.view_type == "isometric"], result)
+
+        # 右侧纵列：右对齐，从主视顶向下堆叠（侧视/剖面/辅助混合按输入序）
+        col_x_right = self.sheet_w - self.margin
+        col_y = self.sheet_h - self.margin
+        gap = self.spacing
+        ordered = [v for v in column if v.id not in result.positions]
+        ordered.extend(v for v in remaining
+                       if v.view_type in ("detail", "section", "auxiliary")
+                       and v.id not in result.positions and v not in ordered)
+        for v in ordered:
+            w, h = v.width, v.height
+            pos = self._make_pos(col_x_right - w, col_y - h, w, h)
+            if self._fits(pos, result.positions):
+                result.positions[v.id] = pos
+                col_y = pos["y"] - gap
+                continue
+            # 纵列溢出 → 降级依附父视图自由填充
+            parent_pos = result.positions.get(v.parent_id or "") or main_pos
+            pos = self._place_auxiliary(v, parent_pos, result)
+            if pos is None:
+                result.unplaced.append(v.id)
+                result.warnings.append(f"视图 {v.id} 右侧纵列放不下，未落位")
+            else:
+                result.positions[v.id] = pos
+
+    # ---- 公共落位 ----
+
+    def _place_isometrics(
+        self, views: List[LayoutView], result: LayoutResult
+    ) -> None:
+        """轴测图：最大空白角锚定（候选序：左下→右上→左上，避开标题栏/BOM）"""
         for v in views:
             if v.id in result.positions or v.view_type != "isometric":
                 continue
-            pos = self._place_free(v, result, prefer="right")
+            pos = self._place_iso_corner(v, result)
             if pos is None:
                 result.unplaced.append(v.id)
                 result.warnings.append(f"轴测图 {v.id} 放不下，未落位")
             else:
                 result.positions[v.id] = pos
 
-        # 5. 辅助视图（detail/section/auxiliary）：依附父视图填充
+    def _place_iso_corner(
+        self, v: LayoutView, result: LayoutResult
+    ) -> Optional[Dict[str, float]]:
+        m = self.margin
+        bottom = self._bottom_forbidden_top(v)
+        corners = {
+            "bottom_left": (m, bottom),
+            "top_right": (self.sheet_w - m - v.width,
+                          self.sheet_h - m - v.height),
+            "top_left": (m, self.sheet_h - m - v.height),
+        }
+        for name in ISO_CORNER_ORDER:
+            x, y = corners[name]
+            pos = self._make_pos(x, y, v.width, v.height)
+            if self._fits(pos, result.positions):
+                return pos
+        return self._place_free(v, result, prefer="left")
+
+    def _place_auxiliaries(
+        self,
+        views: List[LayoutView],
+        result: LayoutResult,
+        main_pos: Dict[str, float],
+    ) -> None:
         for v in views:
             if v.id in result.positions:
                 continue
@@ -182,17 +352,48 @@ class LayoutEngine:
             if pos is None:
                 result.unplaced.append(v.id)
                 result.warnings.append(
-                    f"辅助视图 {v.id}（父视图 {v.parent_id or main.id}）放不下，未落位"
+                    f"辅助视图 {v.id}（父视图 {v.parent_id or ''}）放不下，未落位"
                 )
             else:
                 result.positions[v.id] = pos
 
-        # 6. 全局校验（absolute 已告警过的不重复）
-        for vid, pos in result.positions.items():
-            if by_id[vid].position_mode != "absolute":
-                self._collect_violations(vid, pos, result.positions, result.warnings,
-                                         skip_id=vid)
-        return result
+    # ---- 视图群居中 ----
+
+    def _center_group(self, result: LayoutResult) -> None:
+        """投影视图群整体在可用区内居中（纯平移，保持内部对齐关系）。
+        轴测图不参与：它是角落锚定视图，不随群组平移。"""
+        group = {vid: p for vid, p in result.positions.items()
+                 if self._view_type_of(vid) != "isometric"}
+        if not group:
+            return
+        xs = [p["x"] for p in group.values()]
+        ys = [p["y"] for p in group.values()]
+        xr = [p["x"] + p["width"] for p in group.values()]
+        yr = [p["y"] + p["height"] for p in group.values()]
+        gx0, gy0, gx1, gy1 = min(xs), min(ys), max(xr), max(yr)
+        avail_x0 = self.margin
+        avail_x1 = self.sheet_w - self.margin
+        avail_y1 = self.sheet_h - self.margin
+        # 下界：与群组水平范围相交的底部禁放区（标题栏/BOM）顶
+        avail_y0 = self.margin
+        for zone in self._forbidden_zones():
+            if zone["x"] < gx1 and zone["x"] + zone["width"] > gx0:
+                avail_y0 = max(avail_y0, zone["y"] + zone["height"])
+        dx = (avail_x0 + avail_x1 - (gx0 + gx1)) / 2.0
+        dy = (avail_y0 + avail_y1 - (gy0 + gy1)) / 2.0
+        # 钳制：禁放区/图纸硬边界不可破；边距为软约束（群组过宽时居中优先）
+        dx = min(max(dx, -gx0), self.sheet_w - gx1)
+        dy = min(max(dy, avail_y0 - gy0), self.sheet_h - self.margin - gy1)
+        if abs(dx) < 0.01 and abs(dy) < 0.01:
+            return
+        for vid, p in group.items():
+            result.positions[vid] = self._make_pos(
+                p["x"] + dx, p["y"] + dy, p["width"], p["height"]
+            )
+
+    def _view_type_of(self, vid: str) -> str:
+        v = getattr(self, "_by_id", {}).get(vid)
+        return v.view_type if v is not None else ""
 
     def suggest_sheet_size(
         self, views: List[LayoutView], base: str = "A4"
@@ -211,6 +412,41 @@ class LayoutEngine:
         return None
 
     # ---- 内部：落位 ----
+
+    def _place_main_reserved(
+        self,
+        main: LayoutView,
+        views: List[LayoutView],
+        slot_map: Dict[str, str],
+        result: LayoutResult,
+    ) -> Dict[str, float]:
+        """主视落位：为各方位槽位的标准视图预留空间后居中。
+        防止主视居中过狠导致侧视/俯视无处可去（第一角方位是硬规则）。
+        """
+        band = max(self.spacing, ANNOTATION_BAND)
+        left_reserve = right_reserve = 0.0
+        above_reserve = below_reserve = 0.0
+        for v in views:
+            if v.id == main.id or v.id in result.positions:
+                continue
+            if v.view_type != "standard":
+                continue
+            slot = slot_map.get(v.name)
+            if slot in ("right_of", "far_right"):
+                right_reserve += v.width + band
+            elif slot in ("left_of", "far_left"):
+                left_reserve += v.width + band
+            elif slot == "above":
+                above_reserve = max(above_reserve, v.height + band)
+            elif slot == "below":
+                below_reserve = max(below_reserve, v.height + band)
+        usable_x0 = self.margin
+        usable_x1 = self.sheet_w - self.margin
+        x = usable_x0 + left_reserve + max(
+            0.0, (usable_x1 - usable_x0 - left_reserve - right_reserve
+                  - main.width) / 2.0)
+        y = self.sheet_h - self.margin - above_reserve - main.height
+        return self._make_pos(x, y, main.width, main.height)
 
     def _place_main(
         self, v: LayoutView, above_h: Optional[float] = None
@@ -250,7 +486,26 @@ class LayoutEngine:
         main_pos: Dict[str, float],
         result: LayoutResult,
     ) -> Optional[Dict[str, float]]:
-        gap = self.spacing
+        band = max(self.spacing, ANNOTATION_BAND)
+        pos = self._slot_pos(v, slot, main_pos, band, result)
+        if pos is not None:
+            return pos
+        # 标注带占不下 → 退回基础间距（降级不报错，真机实测阶段再校正）
+        if band > self.spacing:
+            pos = self._slot_pos(v, slot, main_pos, self.spacing, result)
+            if pos is not None:
+                return pos
+        # 槽位冲突：降级自由填充
+        return self._place_free(v, result)
+
+    def _slot_pos(
+        self,
+        v: LayoutView,
+        slot: str,
+        main_pos: Dict[str, float],
+        gap: float,
+        result: LayoutResult,
+    ) -> Optional[Dict[str, float]]:
         if slot == "below":
             x, y = main_pos["x"], main_pos["y"] - gap - v.height
         elif slot == "above":
@@ -277,8 +532,7 @@ class LayoutEngine:
         pos = self._make_pos(x, y, v.width, v.height)
         if self._fits(pos, result.positions):
             return pos
-        # 槽位冲突：降级自由填充
-        return self._place_free(v, result)
+        return None
 
     def _place_by_relation(
         self,
@@ -384,6 +638,37 @@ class LayoutEngine:
         return {"x": 0.0, "y": 0.0, "width": self.sheet_w,
                 "height": TITLE_BLOCK_FALLBACK}
 
+    def _bom_rect(self) -> Optional[Dict[str, float]]:
+        """BOM 预留区（禁放）：有轴测图时贴标题栏上方；无轴测图时占左下角"""
+        if self.bom_rows <= 0:
+            return None
+        tb = self._title_block_rect()
+        h = BOM_HEADER_HEIGHT + BOM_ROW_HEIGHT * self.bom_rows
+        w = min(self.bom_width, self.sheet_w - 2 * self.margin)
+        if getattr(self, "_has_iso", True):
+            # 贴标题栏上方右侧（拉臂总成真图模式）
+            return {"x": max(self.margin, tb["x"] + tb["width"] - w),
+                    "y": tb["y"] + tb["height"], "width": w, "height": h}
+        # 左下角（底架焊合真图模式：左下无轴测时 BOM 落此）
+        return {"x": self.margin, "y": tb["y"] + tb["height"],
+                "width": w, "height": h}
+
+    def _forbidden_zones(self) -> List[Dict[str, float]]:
+        zones = [self._title_block_rect()]
+        bom = self._bom_rect()
+        if bom is not None:
+            zones.append(bom)
+        return zones
+
+    def _bottom_forbidden_top(self, v: LayoutView) -> float:
+        """视图 v 若放左下角，其下边界需让开的禁放区顶"""
+        top = self.margin
+        for zone in self._forbidden_zones():
+            # 只考虑与该视图水平投影相交的左半区禁放区
+            if zone["x"] < self.margin + v.width:
+                top = max(top, zone["y"] + zone["height"])
+        return top
+
     def _fits(
         self, pos: Dict[str, float], placed: Dict[str, Dict[str, float]]
     ) -> bool:
@@ -393,8 +678,9 @@ class LayoutEngine:
             return False
         if pos["y"] + pos["height"] > self.sheet_h:
             return False
-        if _rects_overlap(pos, self._title_block_rect()):
-            return False
+        for zone in self._forbidden_zones():
+            if _rects_overlap(pos, zone):
+                return False
         return not any(_rects_overlap(pos, p) for p in placed.values())
 
     def _collect_violations(
@@ -409,8 +695,12 @@ class LayoutEngine:
                 or pos["x"] + pos["width"] > self.sheet_w \
                 or pos["y"] + pos["height"] > self.sheet_h:
             warnings.append(f"视图 {vid} 超出图幅边界")
-        if _rects_overlap(pos, self._title_block_rect()):
-            warnings.append(f"视图 {vid} 与标题栏禁放区重叠")
+        for name, zone in (("标题栏", self._title_block_rect()),):
+            if _rects_overlap(pos, zone):
+                warnings.append(f"视图 {vid} 与{name}禁放区重叠")
+        bom = self._bom_rect()
+        if bom is not None and _rects_overlap(pos, bom):
+            warnings.append(f"视图 {vid} 与 BOM 预留区重叠")
         for oid, other in placed.items():
             if oid != vid and oid != skip_id and _rects_overlap(pos, other):
                 warnings.append(f"视图 {vid} 与 {oid} 重叠")
